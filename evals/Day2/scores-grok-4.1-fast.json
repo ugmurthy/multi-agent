@@ -1,0 +1,64 @@
+{
+  "files": [
+    {
+      "file": "rust-tutorial-grok4.1Fast.md",
+      "scores": {
+        "quality_of_coverage": 9,
+        "content": 9,
+        "accuracy": 10,
+        "examples": 9
+      },
+      "notes": "Comprehensive coverage from basics to practical project with strong JS analogies and code examples."
+    },
+    {
+      "file": "rust-tutorial-qwen3.5-27b.md",
+      "scores": {
+        "quality_of_coverage": 10,
+        "content": 10,
+        "accuracy": 10,
+        "examples": 10
+      },
+      "notes": "Extremely detailed, advanced topics, exercises with solutions, excellent JS/TS comparisons."
+    },
+    {
+      "file": "rust-tutorial-mistral-large.md",
+      "scores": {
+        "quality_of_coverage": 9,
+        "content": 9,
+        "accuracy": 10,
+        "examples": 8
+      },
+      "notes": "Well-structured with projects, pitfalls, resources; good progressive path but fewer code snippets."
+    },
+    {
+      "file": "rust-tutorial-qwen3_5.md",
+      "scores": {
+        "quality_of_coverage": 8,
+        "content": 8,
+        "accuracy": 9,
+        "examples": 7
+      },
+      "notes": "Solid core concepts, ownership focus, good tables; somewhat concise examples."
+    },
+    {
+      "file": "rust-tutorial-mistral-medium.md",
+      "scores": {
+        "quality_of_coverage": 9,
+        "content": 8,
+        "accuracy": 10,
+        "examples": 9
+      },
+      "notes": "Broad coverage including project; practical TODO API example."
+    },
+    {
+      "file": "rust-tutorial-misral-large.md",
+      "scores": {
+        "quality_of_coverage": 8,
+        "content": 8,
+        "accuracy": 10,
+        "examples": 8
+      },
+      "notes": "Concise, exercise-oriented; good for quick learning."
+    }
+  ]
+}
