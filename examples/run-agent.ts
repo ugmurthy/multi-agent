@@ -23,9 +23,17 @@
  *
  *   # Custom goal
  *   bun run examples/run-agent.ts "Summarize the files in this project"
+ *
+ *   # Auto-approve gated tools in non-interactive runs
+ *   bun run examples/run-agent.ts --auto-approve
+ *
+ *   # Allow more model/tool turns before MAX_STEPS
+ *   AGENT_MAX_STEPS=60 bun run examples/run-agent.ts
  */
 
 import { resolve } from 'node:path';
+import { stdin as input, stdout as output } from 'node:process';
+import { createInterface } from 'node:readline/promises';
 
 import { AdaptiveAgent } from '../packages/core/src/adaptive-agent.js';
 import { InMemoryEventStore } from '../packages/core/src/in-memory-event-store.js';
@@ -39,7 +47,13 @@ import { createWebSearchTool } from '../packages/core/src/tools/web-search.js';
 import { createReadWebPageTool } from '../packages/core/src/tools/read-web-page.js';
 import { loadSkillFromDirectory } from '../packages/core/src/skills/load-skill.js';
 import { skillToDelegate } from '../packages/core/src/skills/skill-to-delegate.js';
-import type { ToolDefinition, DelegateDefinition } from '../packages/core/src/types.js';
+import { createAdaptiveAgentLogger } from '../packages/core/src/logger.js';
+import type { DelegateDefinition, RunResult, ToolDefinition } from '../packages/core/src/types.js';
+//-markdown//
+import { marked } from 'marked';
+import { markedTerminal } from 'marked-terminal';
+
+marked.use(markedTerminal());
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -53,6 +67,18 @@ const MODEL_DEFAULTS: Record<string, string> = {
 
 const PROJECT_ROOT = resolve(import.meta.dir, '..');
 const SKILLS_DIR = resolve(import.meta.dir, 'skills');
+const cliArgs = process.argv.slice(2);
+const verbose = cliArgs.includes('--verbose') || cliArgs.includes('-v');
+const autoApprove = cliArgs.includes('--auto-approve') || process.env.AUTO_APPROVE === '1';
+const positionalArgs = cliArgs.filter((arg) => !['--verbose', '-v', '--auto-approve'].includes(arg));
+const webSearchProviderEnv = process.env.WEB_SEARCH_PROVIDER;
+const webSearchProvider =
+  webSearchProviderEnv === 'duckduckgo' || webSearchProviderEnv === 'brave'
+    ? webSearchProviderEnv
+    : 'brave';
+const maxSteps = parseOptionalPositiveInt(process.env.AGENT_MAX_STEPS);
+const webToolTimeoutMs = parseOptionalPositiveInt(process.env.WEB_TOOL_TIMEOUT_MS);
+const modelTimeoutMs = parseOptionalNonNegativeInt(process.env.MODEL_TIMEOUT_MS);
 
 // ─── Build the model adapter ────────────────────────────────────────────────
 
@@ -74,17 +100,50 @@ const tools: ToolDefinition[] = [
   createWriteFileTool({ allowedRoot: resolve(PROJECT_ROOT, 'artifacts') }),
 ];
 
-// Add web tools only if Brave Search API key is available
-const braveKey = process.env.BRAVE_SEARCH_API_KEY;
-if (braveKey) {
-  tools.push(createWebSearchTool({ apiKey: braveKey }));
-  tools.push(createReadWebPageTool());
-  console.log('🔍 Web search tools enabled (BRAVE_SEARCH_API_KEY found)');
+if (webSearchProviderEnv && webSearchProviderEnv !== webSearchProvider) {
+  console.warn(`⚠️  Unknown WEB_SEARCH_PROVIDER='${webSearchProviderEnv}', defaulting to brave`);
+}
+
+if (process.env.WEB_TOOL_TIMEOUT_MS && webToolTimeoutMs === undefined) {
+  console.warn(`⚠️  Ignoring invalid WEB_TOOL_TIMEOUT_MS='${process.env.WEB_TOOL_TIMEOUT_MS}' (expected a positive integer)`);
+}
+
+if (process.env.MODEL_TIMEOUT_MS && modelTimeoutMs === undefined) {
+  console.warn(
+    `⚠️  Ignoring invalid MODEL_TIMEOUT_MS='${process.env.MODEL_TIMEOUT_MS}' (expected a non-negative integer)`,
+  );
+}
+
+if (process.env.AGENT_MAX_STEPS && maxSteps === undefined) {
+  console.warn(`⚠️  Ignoring invalid AGENT_MAX_STEPS='${process.env.AGENT_MAX_STEPS}' (expected a positive integer)`);
+}
+
+if (webSearchProvider === 'duckduckgo') {
+  tools.push(createWebSearchTool({ provider: 'duckduckgo', timeoutMs: webToolTimeoutMs }));
+  tools.push(createReadWebPageTool({ timeoutMs: webToolTimeoutMs }));
+  console.log(
+    `🔍 Web search tools enabled (WEB_SEARCH_PROVIDER=duckduckgo${webToolTimeoutMs ? `, WEB_TOOL_TIMEOUT_MS=${webToolTimeoutMs}` : ''})`,
+  );
 } else {
-  console.log('⚠️  Web search tools disabled (set BRAVE_SEARCH_API_KEY to enable)');
+  const braveKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (braveKey) {
+    tools.push(createWebSearchTool({ provider: 'brave', apiKey: braveKey, timeoutMs: webToolTimeoutMs }));
+    tools.push(createReadWebPageTool({ timeoutMs: webToolTimeoutMs }));
+    console.log(
+      `🔍 Web search tools enabled (WEB_SEARCH_PROVIDER=brave, BRAVE_SEARCH_API_KEY found${webToolTimeoutMs ? `, WEB_TOOL_TIMEOUT_MS=${webToolTimeoutMs}` : ''})`,
+    );
+  } else {
+    console.log('⚠️  Web search tools disabled (set WEB_SEARCH_PROVIDER=duckduckgo or provide BRAVE_SEARCH_API_KEY)');
+  }
 }
 
 console.log(`🔧 Tools:    ${tools.map((t) => t.name).join(', ')}`);
+if (maxSteps !== undefined) {
+  console.log(`🔁 Max steps: ${maxSteps}`);
+}
+if (modelTimeoutMs !== undefined) {
+  console.log(`⏱️  Model timeout: ${modelTimeoutMs === 0 ? 'disabled' : `${modelTimeoutMs}ms`}`);
+}
 
 // ─── Load skills as delegates ───────────────────────────────────────────────
 
@@ -115,6 +174,11 @@ await tryLoadSkill(resolve(SKILLS_DIR, 'file-analyst'), ['read_file', 'list_dire
 const runStore = new InMemoryRunStore();
 const eventStore = new InMemoryEventStore();
 const snapshotStore = new InMemorySnapshotStore();
+const logger = createAdaptiveAgentLogger({
+  name: 'adaptive-agent-example',
+  level: process.env.AGENT_LOG_LEVEL ?? (verbose ? 'debug' : 'info'),
+  pretty: process.stdout.isTTY,
+});
 
 const agent = new AdaptiveAgent({
   model,
@@ -127,38 +191,88 @@ const agent = new AdaptiveAgent({
   runStore,
   eventStore,
   snapshotStore,
+  logger,
   defaults: {
-    maxSteps: 20,
+    ...(maxSteps === undefined ? {} : { maxSteps }),
     toolTimeoutMs: 30_000,
-    modelTimeoutMs: 60_000,
+    ...(modelTimeoutMs === undefined ? {} : { modelTimeoutMs }),
+    capture: verbose ? 'full' : 'summary',
   },
 });
 
 // ─── Run it ─────────────────────────────────────────────────────────────────
 
-const goal = process.argv[2] ?? 'List the top-level files in this project and summarize what each one is for.';
+const goal = positionalArgs[0] ?? 'List the top-level files in this project and summarize what each one is for.';
 
 console.log(`\n🎯 Goal: ${goal}\n`);
 console.log('─'.repeat(60));
 
 const startTime = Date.now();
 
-try {
-  const result = await agent.run({ goal });
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+async function promptForApproval(toolName: string): Promise<boolean> {
+  if (autoApprove) {
+    console.log(`\n✅ Auto-approving tool: ${toolName}`);
+    return true;
+  }
 
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error(
+      'Approval was requested, but this example is using in-memory stores and no interactive TTY is available. Re-run with --auto-approve or keep the process alive to approve interactively.',
+    );
+  }
+
+  const readline = createInterface({ input, output });
+  try {
+    const answer = await readline.question(`Approve tool "${toolName}"? [y/N] `);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    readline.close();
+  }
+}
+
+async function resolveApproval(runId: string, approved: boolean): Promise<void> {
+  await agent.resolveApproval(runId, approved);
+}
+
+function parseOptionalPositiveInt(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function parseOptionalNonNegativeInt(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function printResult(result: RunResult, elapsedSeconds: string): void {
   console.log('\n' + '─'.repeat(60));
 
   if (result.status === 'success') {
-    console.log(`\n✅ Success (${elapsed}s, ${result.stepsUsed} steps)`);
+    console.log(`\n✅ Success (${elapsedSeconds}s, ${result.stepsUsed} steps)`);
     console.log('\n📄 Output:\n');
     console.log(
       typeof result.output === 'string'
-        ? result.output
-        : JSON.stringify(result.output, null, 2),
+        ? marked.parse(result.output)
+        : marked.parse(JSON.stringify(result.output, null, 2)),
     );
 
-    if (result.usage.promptTokens > 0) {
+    if (verbose && result.usage.promptTokens > 0) {
       console.log('\n📊 Usage:');
       console.log(`   Prompt tokens:     ${result.usage.promptTokens}`);
       console.log(`   Completion tokens: ${result.usage.completionTokens}`);
@@ -167,37 +281,65 @@ try {
       }
       console.log(`   Estimated cost:    $${result.usage.estimatedCostUSD.toFixed(4)}`);
     }
-  } else if (result.status === 'failure') {
-    console.log(`\n❌ Failed (${elapsed}s, ${result.stepsUsed} steps)`);
+    return;
+  }
+
+  if (result.status === 'failure') {
+    console.log(`\n❌ Failed (${elapsedSeconds}s, ${result.stepsUsed} steps)`);
     console.log(`   Code:  ${result.code}`);
     console.log(`   Error: ${result.error}`);
-  } else if (result.status === 'approval_requested') {
-    console.log(`\n⏸️  Approval requested for tool: ${result.toolName}`);
-    console.log(`   ${result.message}`);
-    console.log(`   Run ID: ${result.runId} (use agent.resume() after approval)`);
-  } else if (result.status === 'clarification_requested') {
+    return;
+  }
+
+  if (result.status === 'clarification_requested') {
     console.log(`\n❓ Clarification requested:`);
     console.log(`   ${result.message}`);
+    return;
   }
 
-  console.log('\n🧾 Result object:\n');
-  console.log(JSON.stringify(result, null, 2));
+  console.log(`\n⏸️  Approval requested for tool: ${result.toolName}`);
+  console.log(`   ${result.message}`);
+  console.log(`   Run ID: ${result.runId}`);
+}
 
-  // Show event timeline
-  const events = await eventStore.listByRun(result.runId);
-  console.log(`\n📅 Event timeline (${events.length} events):`);
-  for (const event of events) {
-    const payload = typeof event.payload === 'object' && event.payload !== null ? event.payload : {};
-    const detail = 'toolName' in payload ? ` [${(payload as any).toolName}]` : '';
-    console.log(`   ${event.type}${detail}`);
+try {
+  let result = await agent.run({ goal });
+
+  while (result.status === 'approval_requested') {
+    printResult(result, ((Date.now() - startTime) / 1000).toFixed(1));
+    const approved = await promptForApproval(result.toolName);
+    await resolveApproval(result.runId, approved);
+
+    if (approved) {
+      console.log(`   Approved ${result.toolName}; resuming run...`);
+    } else {
+      console.log(`   Rejected ${result.toolName}; finalizing run...`);
+    }
+
+    result = await agent.resume(result.runId);
   }
 
-  // Show child runs if any
-  const childRuns = await runStore.listChildren(result.runId);
-  if (childRuns.length > 0) {
-    console.log(`\n👥 Child runs (${childRuns.length}):`);
-    for (const child of childRuns) {
-      console.log(`   delegate.${child.delegateName} → ${child.status} (${child.id.slice(0, 8)}...)`);
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  printResult(result, elapsed);
+
+  if (verbose) {
+    console.log('\n🧾 Result object:\n');
+    console.log(JSON.stringify(result, null, 2));
+
+    const events = await eventStore.listByRun(result.runId);
+    console.log(`\n📅 Event timeline (${events.length} events):`);
+    for (const event of events) {
+      const payload = typeof event.payload === 'object' && event.payload !== null ? event.payload : {};
+      const detail = 'toolName' in payload ? ` [${(payload as any).toolName}]` : '';
+      console.log(`   ${event.type}${detail}`);
+    }
+
+    const childRuns = await runStore.listChildren(result.runId);
+    if (childRuns.length > 0) {
+      console.log(`\n👥 Child runs (${childRuns.length}):`);
+      for (const child of childRuns) {
+        console.log(`   delegate.${child.delegateName} → ${child.status} (${child.id.slice(0, 8)}...)`);
+      }
     }
   }
 } catch (error) {

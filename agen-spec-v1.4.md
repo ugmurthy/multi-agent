@@ -195,7 +195,7 @@ const agent = new AdaptiveAgent({
   defaults: {
     maxSteps: 30,
     toolTimeoutMs: 60_000,
-    modelTimeoutMs: 90_000,
+    modelTimeoutMs: 90_000, // raised to 360_000 automatically for provider='ollama' unless overridden
     maxRetriesPerStep: 2,
   },
 });

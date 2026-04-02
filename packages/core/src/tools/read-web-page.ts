@@ -5,28 +5,45 @@ export interface ReadWebPageToolConfig {
   maxSizeBytes?: number;
   /** Maximum extracted text length in characters. Defaults to 50000. */
   maxTextLength?: number;
+  /** Tool timeout in milliseconds. Defaults to `90000`. */
+  timeoutMs?: number;
 }
 
-interface ReadWebPageInput {
+type ReadWebPageInput = {
   url: string;
-}
+};
 
-interface ReadWebPageOutput {
+type ReadWebPageOutput = {
   url: string;
   title: string;
   text: string;
   bytesFetched: number;
-}
+  error?: {
+    kind: 'http_error' | 'network_error' | 'content_error' | 'timeout';
+    message: string;
+    status?: number;
+  };
+};
 
 const DEFAULT_MAX_SIZE = 524_288; // 512 KiB
 const DEFAULT_MAX_TEXT_LENGTH = 50_000;
+const DEFAULT_WEB_TOOL_TIMEOUT_MS = 90_000;
 
-export function createReadWebPageTool(config?: ReadWebPageToolConfig): ToolDefinition {
+class RecoverableReadWebPageError extends Error {
+  constructor(readonly output: ReadWebPageOutput) {
+    super(output.error?.message ?? 'Web page read failed');
+    this.name = 'RecoverableReadWebPageError';
+  }
+}
+
+export function createReadWebPageTool(config?: ReadWebPageToolConfig): ToolDefinition<ReadWebPageInput, ReadWebPageOutput> {
   const maxSizeBytes = config?.maxSizeBytes ?? DEFAULT_MAX_SIZE;
   const maxTextLength = config?.maxTextLength ?? DEFAULT_MAX_TEXT_LENGTH;
+  const timeoutMs = config?.timeoutMs ?? DEFAULT_WEB_TOOL_TIMEOUT_MS;
 
   return {
     name: 'read_web_page',
+    timeoutMs,
     description:
       'Fetch a web page and extract its text content. Returns the URL, page title, and extracted text.',
     inputSchema: {
@@ -40,42 +57,63 @@ export function createReadWebPageTool(config?: ReadWebPageToolConfig): ToolDefin
     async execute(input, context) {
       const { url } = input as unknown as ReadWebPageInput;
 
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'AdaptiveAgent/1.0 (compatible; bot)',
-          Accept: 'text/html,application/xhtml+xml,text/plain',
-        },
-        signal: context.signal,
-      });
+      try {
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'AdaptiveAgent/1.0 (compatible; bot)',
+            Accept: 'text/html,application/xhtml+xml,text/plain',
+          },
+          signal: context.signal,
+        });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} fetching ${url}`);
+        if (!response.ok) {
+          throw createRecoverableReadWebPageError({
+            url,
+            kind: 'http_error',
+            message: `HTTP ${response.status} fetching ${url}`,
+            status: response.status,
+          });
+        }
+
+        const contentType = response.headers.get('content-type') ?? '';
+        if (!contentType.includes('text/') && !contentType.includes('html') && !contentType.includes('xml')) {
+          throw createRecoverableReadWebPageError({
+            url,
+            kind: 'content_error',
+            message: `Unsupported content type ${contentType} for ${url}`,
+          });
+        }
+
+        const rawBuffer = await response.arrayBuffer();
+        if (rawBuffer.byteLength > maxSizeBytes) {
+          throw createRecoverableReadWebPageError({
+            url,
+            kind: 'content_error',
+            message: `Response from ${url} exceeds maximum size of ${maxSizeBytes} bytes`,
+          });
+        }
+
+        const html = new TextDecoder().decode(rawBuffer);
+        const title = extractTitle(html);
+        let text = stripHtmlToText(html);
+
+        if (text.length > maxTextLength) {
+          text = text.slice(0, maxTextLength) + '\n[truncated]';
+        }
+
+        return {
+          url,
+          title,
+          text,
+          bytesFetched: rawBuffer.byteLength,
+        } satisfies ReadWebPageOutput;
+      } catch (error) {
+        throw normalizeReadWebPageError(error, url);
       }
-
-      const contentType = response.headers.get('content-type') ?? '';
-      if (!contentType.includes('text/') && !contentType.includes('html') && !contentType.includes('xml')) {
-        throw new Error(`Unsupported content type ${contentType} for ${url}`);
-      }
-
-      const rawBuffer = await response.arrayBuffer();
-      if (rawBuffer.byteLength > maxSizeBytes) {
-        throw new Error(`Response from ${url} exceeds maximum size of ${maxSizeBytes} bytes`);
-      }
-
-      const html = new TextDecoder().decode(rawBuffer);
-      const title = extractTitle(html);
-      let text = stripHtmlToText(html);
-
-      if (text.length > maxTextLength) {
-        text = text.slice(0, maxTextLength) + '\n[truncated]';
-      }
-
-      return {
-        url,
-        title,
-        text,
-        bytesFetched: rawBuffer.byteLength,
-      } satisfies ReadWebPageOutput as unknown as ReturnType<ToolDefinition['execute']>;
+    },
+    recoverError(error, input) {
+      const { url } = input;
+      return normalizeReadWebPageError(error, url).output;
     },
   };
 }
@@ -122,4 +160,46 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
     .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function normalizeReadWebPageError(error: unknown, url: string): RecoverableReadWebPageError {
+  if (error instanceof RecoverableReadWebPageError) {
+    return error;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return createRecoverableReadWebPageError({
+    url,
+    kind: isTimeoutError(error) ? 'timeout' : 'network_error',
+    message,
+  });
+}
+
+function createRecoverableReadWebPageError({
+  url,
+  kind,
+  message,
+  status,
+}: {
+  url: string;
+  kind: 'http_error' | 'network_error' | 'content_error' | 'timeout';
+  message: string;
+  status?: number;
+}): RecoverableReadWebPageError {
+  return new RecoverableReadWebPageError({
+    url,
+    title: '',
+    text: '',
+    bytesFetched: 0,
+    error: {
+      kind,
+      message,
+      status,
+    },
+  });
+}
+
+function isTimeoutError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Timed out after \d+ms$/.test(message);
 }

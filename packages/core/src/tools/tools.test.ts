@@ -24,6 +24,14 @@ function stubToolContext(overrides?: Partial<ToolContext>): ToolContext {
   };
 }
 
+async function executeRecoverableTool(tool: { execute: (input: any, context: ToolContext) => Promise<unknown>; recoverError?: (error: unknown, input: unknown) => unknown }, input: unknown) {
+  try {
+    return await tool.execute(input as any, stubToolContext());
+  } catch (error) {
+    return tool.recoverError?.(error, input);
+  }
+}
+
 // ── read_file ───────────────────────────────────────────────────────────────
 
 describe('createReadFileTool', () => {
@@ -272,11 +280,134 @@ describe('createWebSearchTool', () => {
       url: 'https://example.com/1',
       snippet: 'First result',
     });
+    expect(tool.summarizeResult?.(result)).toMatchObject({
+      provider: 'brave',
+      providerPath: 'api',
+      resultCount: 2,
+    });
 
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain('web/search');
     expect(url).toContain('q=test+query');
     expect(init.headers['X-Subscription-Token']).toBe('brave-key');
+  });
+
+  it('sends a DuckDuckGo request and parses lite results', async () => {
+    const tool = createWebSearchTool({ provider: 'duckduckgo' });
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        "<script>DDG.deep.initialize('/d.js?q=test%20query&vqd=123', false);</script>",
+        { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+      ),
+    );
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        "if (DDG.pageLayout) DDG.pageLayout.load('d',[{\"a\":\"First <b>result</b>\",\"t\":\"Result 1\",\"u\":\"https://example.com/1\"},{\"a\":\"Second result\",\"t\":\"Result 2\",\"u\":\"https://example.com/2\"}]);DDG.duckbar.load('images', {});",
+        { status: 200, headers: { 'Content-Type': 'application/javascript; charset=utf-8' } },
+      ),
+    );
+
+    const result = (await tool.execute(
+      { query: 'test query' } as any,
+      stubToolContext(),
+    )) as any;
+
+    expect(result.query).toBe('test query');
+    expect(result.results).toEqual([
+      {
+        title: 'Result 1',
+        url: 'https://example.com/1',
+        snippet: 'First result',
+      },
+      {
+        title: 'Result 2',
+        url: 'https://example.com/2',
+        snippet: 'Second result',
+      },
+    ]);
+    expect(tool.summarizeResult?.(result)).toMatchObject({
+      provider: 'duckduckgo',
+      providerPath: 'deep',
+      resultCount: 2,
+    });
+    expect(JSON.stringify(result)).not.toContain('providerPath');
+
+    const [pageUrl, pageInit] = fetchSpy.mock.calls[0];
+    const [deepUrl, deepInit] = fetchSpy.mock.calls[1];
+    expect(pageUrl).toContain('duckduckgo.com/');
+    expect(pageUrl).toContain('q=test+query');
+    expect(pageUrl).toContain('ia=web');
+    expect(pageInit.headers['X-Subscription-Token']).toBeUndefined();
+    expect(deepUrl).toBe('https://duckduckgo.com/d.js?q=test%20query&vqd=123');
+    expect(deepInit.headers.Referer).toContain('duckduckgo.com/');
+  });
+
+  it('falls back to DuckDuckGo HTML results when the deep payload is unavailable', async () => {
+    const tool = createWebSearchTool({ provider: 'duckduckgo' });
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response('<html><body>No deep initialization here</body></html>', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      }),
+    );
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        `
+          <div class="result">
+            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F1&amp;rut=abc" class="result__a">Result <b>1</b></a>
+            <div class="result__snippet">First <b>result</b></div>
+          </div>
+        `,
+        { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+      ),
+    );
+
+    const result = (await tool.execute(
+      { query: 'test query' } as any,
+      stubToolContext(),
+    )) as any;
+
+    expect(result.results).toEqual([
+      {
+        title: 'Result 1',
+        url: 'https://example.com/1',
+        snippet: 'First result',
+      },
+    ]);
+    expect(tool.summarizeResult?.(result)).toMatchObject({
+      provider: 'duckduckgo',
+      providerPath: 'html-fallback',
+      resultCount: 1,
+    });
+
+    const [fallbackUrl] = fetchSpy.mock.calls[1];
+    expect(fallbackUrl).toContain('html.duckduckgo.com/html/');
+    expect(fallbackUrl).toContain('q=test+query');
+  });
+
+  it('returns a recoverable error on a DuckDuckGo anomaly challenge page', async () => {
+    const tool = createWebSearchTool({ provider: 'duckduckgo' });
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response('<form action="//duckduckgo.com/anomaly.js"></form>', {
+        status: 202,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      }),
+    );
+
+    const result = (await executeRecoverableTool(tool, { query: 'test' })) as any;
+
+    expect(result).toMatchObject({
+      query: 'test',
+      results: [],
+      error: {
+        kind: 'challenge',
+        status: 202,
+        provider: 'duckduckgo',
+      },
+    });
   });
 
   it('respects maxResults', async () => {
@@ -304,16 +435,32 @@ describe('createWebSearchTool', () => {
     expect(result.results).toHaveLength(1);
   });
 
-  it('throws on non-OK response', async () => {
+  it('returns a recoverable error on non-OK response', async () => {
     const tool = createWebSearchTool({ apiKey: 'key' });
 
     fetchSpy.mockResolvedValueOnce(
       new Response('forbidden', { status: 403 }),
     );
 
-    await expect(
-      tool.execute({ query: 'test' } as any, stubToolContext()),
-    ).rejects.toThrow('403');
+    const result = (await executeRecoverableTool(tool, { query: 'test' })) as any;
+
+    expect(result).toMatchObject({
+      query: 'test',
+      results: [],
+      error: {
+        kind: 'http_error',
+        status: 403,
+        provider: 'brave',
+      },
+    });
+    expect(tool.summarizeResult?.(result)).toMatchObject({
+      provider: 'brave',
+      resultCount: 0,
+      error: {
+        kind: 'http_error',
+        status: 403,
+      },
+    });
   });
 
   it('has correct tool metadata', () => {
@@ -410,19 +557,28 @@ describe('createReadWebPageTool', () => {
     expect(result.text).toContain('Tom & Jerry <3>');
   });
 
-  it('throws on non-OK response', async () => {
+  it('returns a recoverable error on non-OK response', async () => {
     const tool = createReadWebPageTool();
 
     fetchSpy.mockResolvedValueOnce(
       new Response('not found', { status: 404, headers: { 'Content-Type': 'text/html' } }),
     );
 
-    await expect(
-      tool.execute({ url: 'https://example.com/nope' } as any, stubToolContext()),
-    ).rejects.toThrow('404');
+    const result = (await executeRecoverableTool(tool, { url: 'https://example.com/nope' })) as any;
+
+    expect(result).toMatchObject({
+      url: 'https://example.com/nope',
+      title: '',
+      text: '',
+      bytesFetched: 0,
+      error: {
+        kind: 'http_error',
+        status: 404,
+      },
+    });
   });
 
-  it('throws on non-text content type', async () => {
+  it('returns a recoverable error on non-text content type', async () => {
     const tool = createReadWebPageTool();
 
     fetchSpy.mockResolvedValueOnce(
@@ -432,9 +588,33 @@ describe('createReadWebPageTool', () => {
       }),
     );
 
-    await expect(
-      tool.execute({ url: 'https://example.com/bin' } as any, stubToolContext()),
-    ).rejects.toThrow('Unsupported content type');
+    const result = (await executeRecoverableTool(tool, { url: 'https://example.com/bin' })) as any;
+
+    expect(result).toMatchObject({
+      url: 'https://example.com/bin',
+      error: {
+        kind: 'content_error',
+      },
+    });
+    expect(result.error.message).toContain('Unsupported content type');
+  });
+
+  it('returns a recoverable timeout error for slow page reads', () => {
+    const tool = createReadWebPageTool();
+    const result = tool.recoverError?.(new Error('Timed out after 30000ms'), {
+      url: 'https://example.com/slow',
+    } as any) as any;
+
+    expect(result).toMatchObject({
+      url: 'https://example.com/slow',
+      title: '',
+      text: '',
+      bytesFetched: 0,
+      error: {
+        kind: 'timeout',
+        message: 'Timed out after 30000ms',
+      },
+    });
   });
 
   it('has correct tool metadata', () => {

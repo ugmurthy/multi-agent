@@ -1,3 +1,5 @@
+import type { Logger } from 'pino';
+
 export type UUID = string;
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -159,6 +161,8 @@ export interface AdaptiveAgentOptions {
   snapshotStore?: SnapshotStore;
   planStore?: PlanStore;
   eventSink?: EventSink;
+  /** Optional structured runtime logger. Pino is the intended implementation. */
+  logger?: Logger;
   defaults?: AgentDefaults;
   /** Optional system instructions injected into the system prompt. Used by delegate/skill child runs. */
   systemInstructions?: string;
@@ -191,6 +195,7 @@ export interface ToolDefinition<I extends JsonValue = JsonValue, O extends JsonV
   capture?: CaptureMode;
   redact?: ToolRedactionPolicy;
   summarizeResult?: (output: O) => JsonValue;
+  recoverError?: (error: unknown, input: I) => O | undefined;
   execute(input: I, context: ToolContext): Promise<O>;
 }
 

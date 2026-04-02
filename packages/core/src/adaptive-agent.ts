@@ -1,8 +1,19 @@
+import type { Logger } from 'pino';
+
 import { DelegationError, DelegationExecutor, type ExecuteChildRunRequest, type ParentResumeResult } from './delegation-executor.js';
+import {
+  captureToolInputForLog,
+  captureToolOutputForLog,
+  runLogBindings,
+  summarizeModelRequestForLog,
+  summarizeModelResponseForLog,
+} from './logging.js';
+import { captureValueForLog, errorForLog, summarizeValueForLog } from './logger.js';
 import type {
   AdaptiveAgentOptions,
   AgentEvent,
   AgentRun,
+  CaptureMode,
   ExecutePlanRequest,
   EventSink,
   JsonObject,
@@ -38,6 +49,7 @@ interface ExecutionState {
   stepsUsed: number;
   outputSchema?: JsonSchema;
   pendingToolCalls: PendingToolCallState[];
+  approvedToolCallIds: string[];
   waitingOnChildRunId?: UUID;
 }
 
@@ -51,6 +63,8 @@ const DEFAULT_AGENT_DEFAULTS = {
   modelTimeoutMs: 90_000,
   maxRetriesPerStep: 0,
 } as const;
+
+const OLLAMA_MODEL_TIMEOUT_MULTIPLIER = 4;
 
 const TERMINAL_RUN_STATUSES = new Set<RunStatus>([
   'succeeded',
@@ -70,17 +84,25 @@ export class AdaptiveAgent {
     modelTimeoutMs: number;
     maxRetriesPerStep: number;
   };
+  private readonly defaultCaptureMode: CaptureMode;
   private readonly leaseOwner = `adaptive-agent:${crypto.randomUUID()}`;
   private readonly eventEmitter: EventSink;
   private readonly delegationExecutor: DelegationExecutor;
+  private readonly logger?: Logger;
 
   constructor(private readonly options: AdaptiveAgentOptions) {
     this.defaults = {
       maxSteps: options.defaults?.maxSteps ?? DEFAULT_AGENT_DEFAULTS.maxSteps,
       toolTimeoutMs: options.defaults?.toolTimeoutMs ?? DEFAULT_AGENT_DEFAULTS.toolTimeoutMs,
-      modelTimeoutMs: options.defaults?.modelTimeoutMs ?? DEFAULT_AGENT_DEFAULTS.modelTimeoutMs,
+      modelTimeoutMs: options.defaults?.modelTimeoutMs ?? resolveDefaultModelTimeoutMs(options.model.provider),
       maxRetriesPerStep: options.defaults?.maxRetriesPerStep ?? DEFAULT_AGENT_DEFAULTS.maxRetriesPerStep,
     };
+    this.defaultCaptureMode = options.defaults?.capture ?? 'summary';
+    this.logger = options.logger?.child({
+      component: 'adaptive-agent',
+      provider: options.model.provider,
+      model: options.model.model,
+    });
     this.eventEmitter = createCompositeEventSink(options.eventStore, options.eventSink);
     this.delegationExecutor = new DelegationExecutor({
       model: options.model,
@@ -90,6 +112,7 @@ export class AdaptiveAgent {
       defaults: options.defaults,
       runStore: options.runStore,
       eventSink: this.eventEmitter,
+      logger: this.logger,
       snapshotStore: options.snapshotStore,
       executeChildRun: (request) => this.executeChildRun(request),
     });
@@ -101,6 +124,12 @@ export class AdaptiveAgent {
 
       this.toolRegistry.set(tool.name, tool);
     }
+
+    this.logLifecycle('debug', 'agent.initialized', {
+      toolNames: Array.from(this.toolRegistry.keys()),
+      delegateNames: (options.delegates ?? []).map((delegate) => delegate.name),
+      defaults: this.defaults,
+    });
   }
 
   async run(request: RunRequest): Promise<RunResult> {
@@ -110,6 +139,15 @@ export class AdaptiveAgent {
       context: request.context,
       metadata: request.metadata,
       status: 'queued',
+    });
+
+    this.logLifecycle('info', 'run.created', {
+      ...runLogBindings(createdRun),
+      goal: summarizeValueForLog(request.goal),
+      input: captureValueForLog(request.input, { mode: this.defaultCaptureMode }),
+      context: captureValueForLog(request.context, { mode: this.defaultCaptureMode }),
+      metadata: captureValueForLog(request.metadata, { mode: 'summary' }),
+      outputSchema: request.outputSchema ? summarizeValueForLog(request.outputSchema) : undefined,
     });
 
     await this.emit({
@@ -170,6 +208,17 @@ export class AdaptiveAgent {
       createdRun.version,
     );
 
+    this.logLifecycle('info', 'plan.execution_started', {
+      ...runLogBindings(currentRun),
+      planId: plan.id,
+      planExecutionId: planExecution.id,
+      goal: summarizeValueForLog(plan.goal),
+      input: captureValueForLog(request.input, { mode: this.defaultCaptureMode }),
+      context: captureValueForLog(request.context, { mode: this.defaultCaptureMode }),
+      metadata: captureValueForLog(request.metadata, { mode: 'summary' }),
+      stepCount: steps.length,
+    });
+
     await this.emit({
       runId: currentRun.id,
       planExecutionId: planExecution.id,
@@ -220,6 +269,12 @@ export class AdaptiveAgent {
         });
 
         if (!planStepPreconditionsMet(step, request.input, request.context, resolvedStepOutputs)) {
+          this.logLifecycle('debug', 'step.completed', {
+            ...runLogBindings(currentRun),
+            planExecutionId: currentExecution.id,
+            stepId: step.id,
+            skipped: true,
+          });
           await this.emit({
             runId: currentRun.id,
             planExecutionId: currentExecution.id,
@@ -245,6 +300,14 @@ export class AdaptiveAgent {
           );
         }
 
+        this.logLifecycle('debug', 'step.started', {
+          ...runLogBindings(currentRun),
+          planExecutionId: currentExecution.id,
+          stepId: step.id,
+          toolName: tool.name,
+          stepIndex: index,
+        });
+
         await this.emit({
           runId: currentRun.id,
           planExecutionId: currentExecution.id,
@@ -264,6 +327,14 @@ export class AdaptiveAgent {
             status: 'awaiting_approval',
             currentStepId: step.id,
             currentStepIndex: index,
+          });
+
+          this.logLifecycle('warn', 'approval.requested', {
+            ...runLogBindings(currentRun),
+            planExecutionId: currentExecution.id,
+            stepId: step.id,
+            toolName: tool.name,
+            input: captureToolInputForLog(tool, resolvePlanTemplate(step.inputTemplate, request.input, request.context, resolvedStepOutputs), this.defaultCaptureMode),
           });
 
           await this.emit({
@@ -289,6 +360,14 @@ export class AdaptiveAgent {
 
         const input = resolvePlanTemplate(step.inputTemplate, request.input, request.context, resolvedStepOutputs);
         const toolContext = this.createToolContext(currentRun, step.id, `plan:${currentExecution.id}:${step.id}`);
+        const toolStartedAt = Date.now();
+        let recoveredToolFailure = false;
+
+        this.logToolStarted(currentRun, step.id, tool, input, {
+          planId: plan.id,
+          planExecutionId: currentExecution.id,
+          stepIndex: index,
+        });
 
         await this.emit({
           runId: currentRun.id,
@@ -309,6 +388,17 @@ export class AdaptiveAgent {
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          const recoveredOutput = recoverToolError(tool, error, input);
+          this.logToolFailed(currentRun, step.id, tool, input, error, Date.now() - toolStartedAt, {
+            planId: plan.id,
+            planExecutionId: currentExecution.id,
+            stepIndex: index,
+            recoverable: recoveredOutput !== undefined,
+            recoveredOutput:
+              recoveredOutput === undefined
+                ? undefined
+                : captureToolOutputForLog(tool, recoveredOutput, this.defaultCaptureMode),
+          });
           await this.emit({
             runId: currentRun.id,
             planExecutionId: currentExecution.id,
@@ -318,27 +408,39 @@ export class AdaptiveAgent {
             payload: {
               toolName: tool.name,
               error: message,
+              recoverable: recoveredOutput !== undefined,
+              output:
+                recoveredOutput === undefined
+                  ? undefined
+                  : tool.summarizeResult
+                    ? tool.summarizeResult(recoveredOutput)
+                    : recoveredOutput,
             },
           });
 
-          if (step.onFailure === 'skip') {
-            await this.emit({
-              runId: currentRun.id,
-              planExecutionId: currentExecution.id,
-              stepId: step.id,
-              type: 'step.completed',
-              schemaVersion: 1,
-              payload: {
+          if (recoveredOutput !== undefined) {
+            recoveredToolFailure = true;
+            lastOutput = recoveredOutput;
+          } else {
+            if (step.onFailure === 'skip') {
+              await this.emit({
+                runId: currentRun.id,
+                planExecutionId: currentExecution.id,
                 stepId: step.id,
-                skipped: true,
-                error: message,
-              },
-            });
-            continue;
-          }
+                type: 'step.completed',
+                schemaVersion: 1,
+                payload: {
+                  stepId: step.id,
+                  skipped: true,
+                  error: message,
+                },
+              });
+              continue;
+            }
 
-          const failureCode = step.onFailure === 'replan' ? 'REPLAN_REQUIRED' : 'TOOL_ERROR';
-          return this.failPlanExecution(currentRun, currentExecution, stepsUsed, message, failureCode);
+            const failureCode = step.onFailure === 'replan' ? 'REPLAN_REQUIRED' : 'TOOL_ERROR';
+            return this.failPlanExecution(currentRun, currentExecution, stepsUsed, message, failureCode);
+          }
         }
 
         stepsUsed += 1;
@@ -347,16 +449,30 @@ export class AdaptiveAgent {
           resolvedStepOutputs.set(step.outputKey, lastOutput);
         }
 
-        await this.emit({
-          runId: currentRun.id,
+        if (!recoveredToolFailure) {
+          this.logToolCompleted(currentRun, step.id, tool, input, lastOutput, Date.now() - toolStartedAt, {
+            planId: plan.id,
+            planExecutionId: currentExecution.id,
+            stepIndex: index,
+          });
+
+          await this.emit({
+            runId: currentRun.id,
+            planExecutionId: currentExecution.id,
+            stepId: step.id,
+            type: 'tool.completed',
+            schemaVersion: 1,
+            payload: {
+              toolName: tool.name,
+              output: tool.summarizeResult ? tool.summarizeResult(lastOutput) : lastOutput,
+            },
+          });
+        }
+        this.logLifecycle('debug', 'step.completed', {
+          ...runLogBindings(currentRun),
           planExecutionId: currentExecution.id,
           stepId: step.id,
-          type: 'tool.completed',
-          schemaVersion: 1,
-          payload: {
-            toolName: tool.name,
-            output: tool.summarizeResult ? tool.summarizeResult(lastOutput) : lastOutput,
-          },
+          toolName: tool.name,
         });
         await this.emit({
           runId: currentRun.id,
@@ -418,6 +534,10 @@ export class AdaptiveAgent {
     }
 
     const interruptedRun = await this.transitionRun(run, 'interrupted');
+    this.logLifecycle('warn', 'run.interrupted', {
+      ...runLogBindings(interruptedRun),
+      stepId: interruptedRun.currentStepId,
+    });
     await this.emit({
       runId,
       stepId: interruptedRun.currentStepId,
@@ -436,11 +556,63 @@ export class AdaptiveAgent {
     }
   }
 
+  async resolveApproval(runId: UUID, approved: boolean): Promise<void> {
+    const run = await this.options.runStore.getRun(runId);
+    if (!run) {
+      throw new Error(`Run ${runId} does not exist`);
+    }
+
+    if (run.status !== 'awaiting_approval') {
+      throw new Error(`Run ${runId} is not awaiting approval`);
+    }
+
+    const state = await this.loadExecutionState(run);
+    const pendingToolCall = state.pendingToolCalls[0];
+    if (!pendingToolCall) {
+      throw new Error(
+        `Run ${runId} is awaiting approval, but no pending tool call was found. Persisted plan approval resolution is not implemented yet.`,
+      );
+    }
+
+    await this.emit({
+      runId: run.id,
+      stepId: pendingToolCall.stepId,
+      type: 'approval.resolved',
+      schemaVersion: 1,
+      payload: {
+        toolName: pendingToolCall.name,
+        approved,
+      },
+    });
+
+    this.logLifecycle('info', 'approval.resolved', {
+      ...runLogBindings(run),
+      stepId: pendingToolCall.stepId,
+      toolName: pendingToolCall.name,
+      approved,
+    });
+
+    if (!approved) {
+      await this.failRun(run, state, `Approval rejected for ${pendingToolCall.name}`, 'APPROVAL_REJECTED');
+      return;
+    }
+
+    state.approvedToolCallIds = addApprovedToolCallId(state.approvedToolCallIds, pendingToolCall.id);
+    const resumedRun = await this.transitionRun(run, 'running');
+    await this.saveExecutionSnapshot(resumedRun, state, resumedRun.status);
+  }
+
   async resume(runId: UUID): Promise<RunResult> {
     const run = await this.options.runStore.getRun(runId);
     if (!run) {
       throw new Error(`Run ${runId} does not exist`);
     }
+
+    this.logLifecycle('info', 'run.resume_requested', {
+      ...runLogBindings(run),
+      status: run.status,
+      stepId: run.currentStepId,
+    });
 
     const state = await this.loadExecutionState(run);
     if (TERMINAL_RUN_STATUSES.has(run.status)) {
@@ -472,6 +644,10 @@ export class AdaptiveAgent {
 
     if (currentRun.status === 'interrupted') {
       currentRun = await this.transitionRun(currentRun, 'running');
+      this.logLifecycle('info', 'run.resumed', {
+        ...runLogBindings(currentRun),
+        stepId: currentRun.currentStepId,
+      });
       await this.emit({
         runId,
         stepId: currentRun.currentStepId,
@@ -533,6 +709,11 @@ export class AdaptiveAgent {
 
       if (pendingToolCall) {
         if (pendingToolCall.needsStepStarted) {
+          this.logLifecycle('debug', 'step.started', {
+            ...runLogBindings(currentRun),
+            stepId,
+            toolName: pendingToolCall.name,
+          });
           await this.emit({
             runId: currentRun.id,
             stepId,
@@ -572,8 +753,15 @@ export class AdaptiveAgent {
 
         state.messages.push(toolResultMessage(pendingToolCall, toolOutput));
         state.pendingToolCalls.shift();
+        state.approvedToolCallIds = removeApprovedToolCallId(state.approvedToolCallIds, pendingToolCall.id);
         state.waitingOnChildRunId = undefined;
         state.stepsUsed += 1;
+
+        this.logLifecycle('debug', 'step.completed', {
+          ...runLogBindings(currentRun),
+          stepId,
+          toolName: pendingToolCall.name,
+        });
 
         await this.emit({
           runId: currentRun.id,
@@ -591,6 +779,11 @@ export class AdaptiveAgent {
         continue;
       }
 
+      this.logLifecycle('debug', 'step.started', {
+        ...runLogBindings(currentRun),
+        stepId,
+      });
+
       await this.emit({
         runId: currentRun.id,
         stepId,
@@ -601,7 +794,19 @@ export class AdaptiveAgent {
         },
       });
 
-      const response = await this.generateModelResponse(currentRun, state);
+      let response: ModelResponse;
+      try {
+        response = await this.generateModelResponse(currentRun, state);
+      } catch (error) {
+        currentRun = await this.refreshRun(currentRun.id);
+        return this.failRun(
+          currentRun,
+          state,
+          error instanceof Error ? error.message : String(error),
+          'MODEL_ERROR',
+        );
+      }
+
       currentRun = await this.refreshRun(currentRun.id);
 
       if (response.finishReason === 'error') {
@@ -616,12 +821,28 @@ export class AdaptiveAgent {
       if (response.toolCalls && response.toolCalls.length > 0) {
         state.pendingToolCalls.push(...createPendingToolCalls(response.toolCalls, state.stepsUsed + 1));
 
+        this.logLifecycle('debug', 'model.tool_calls_queued', {
+          ...runLogBindings(currentRun),
+          stepId,
+          toolCalls: response.toolCalls.map((toolCall) => ({
+            id: toolCall.id,
+            name: toolCall.name,
+            input: summarizeValueForLog(toolCall.input),
+          })),
+        });
+
         await this.saveExecutionSnapshot(currentRun, state, currentRun.status);
         continue;
       }
 
       const output = response.structuredOutput ?? response.text ?? null;
       state.stepsUsed += 1;
+
+      this.logLifecycle('debug', 'step.completed', {
+        ...runLogBindings(currentRun),
+        stepId,
+        output: summarizeValueForLog(output),
+      });
 
       await this.emit({
         runId: currentRun.id,
@@ -650,8 +871,14 @@ export class AdaptiveAgent {
       throw new Error(`Unknown tool ${pendingToolCall.name}`);
     }
 
-    if (tool.requiresApproval) {
+    if (tool.requiresApproval && !state.approvedToolCallIds.includes(pendingToolCall.id)) {
       const awaitingApprovalRun = await this.transitionRun(run, 'awaiting_approval');
+      this.logLifecycle('warn', 'approval.requested', {
+        ...runLogBindings(awaitingApprovalRun),
+        stepId: pendingToolCall.stepId,
+        toolName: tool.name,
+        input: captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode),
+      });
       await this.emit({
         runId: run.id,
         stepId: pendingToolCall.stepId,
@@ -666,10 +893,14 @@ export class AdaptiveAgent {
       throw new ApprovalRequiredError(tool.name);
     }
 
+    state.approvedToolCallIds = removeApprovedToolCallId(state.approvedToolCallIds, pendingToolCall.id);
+
     const toolContext = this.createToolContext(run, pendingToolCall.stepId, pendingToolCall.id);
     const emitsToolLifecycle = tool.name.startsWith(RESERVED_DELEGATE_PREFIX);
+    const toolStartedAt = Date.now();
 
     if (!emitsToolLifecycle) {
+      this.logToolStarted(run, pendingToolCall.stepId, tool, pendingToolCall.input);
       await this.emit({
         runId: run.id,
         stepId: pendingToolCall.stepId,
@@ -689,6 +920,14 @@ export class AdaptiveAgent {
       );
 
       if (!emitsToolLifecycle) {
+        this.logToolCompleted(
+          run,
+          pendingToolCall.stepId,
+          tool,
+          pendingToolCall.input,
+          output,
+          Date.now() - toolStartedAt,
+        );
         await this.emit({
           runId: run.id,
           stepId: pendingToolCall.stepId,
@@ -707,7 +946,24 @@ export class AdaptiveAgent {
         throw error;
       }
 
+      const recoveredOutput = recoverToolError(tool, error, pendingToolCall.input);
+
       if (!emitsToolLifecycle) {
+        this.logToolFailed(
+          run,
+          pendingToolCall.stepId,
+          tool,
+          pendingToolCall.input,
+          error,
+          Date.now() - toolStartedAt,
+          {
+            recoverable: recoveredOutput !== undefined,
+            recoveredOutput:
+              recoveredOutput === undefined
+                ? undefined
+                : captureToolOutputForLog(tool, recoveredOutput, this.defaultCaptureMode),
+          },
+        );
         await this.emit({
           runId: run.id,
           stepId: pendingToolCall.stepId,
@@ -716,8 +972,19 @@ export class AdaptiveAgent {
           payload: {
             toolName: tool.name,
             error: error instanceof Error ? error.message : String(error),
+            recoverable: recoveredOutput !== undefined,
+            output:
+              recoveredOutput === undefined
+                ? undefined
+                : tool.summarizeResult
+                  ? tool.summarizeResult(recoveredOutput)
+                  : recoveredOutput,
           },
         });
+      }
+
+      if (recoveredOutput !== undefined) {
+        return recoveredOutput;
       }
 
       if (error instanceof DelegationError) {
@@ -800,6 +1067,7 @@ export class AdaptiveAgent {
       snapshotStore: this.options.snapshotStore,
       planStore: this.options.planStore,
       eventSink: this.options.eventSink,
+      logger: this.options.logger,
       defaults: { ...this.options.defaults, ...delegate.defaults },
       systemInstructions: delegate.instructions,
     });
@@ -855,6 +1123,7 @@ export class AdaptiveAgent {
       messages: buildInitialMessages(run, outputSchema, this.options.systemInstructions),
       stepsUsed: 0,
       pendingToolCalls: [],
+      approvedToolCallIds: [],
       outputSchema,
     };
   }
@@ -895,14 +1164,58 @@ export class AdaptiveAgent {
         status,
       },
     });
+
+    this.logLifecycle('debug', 'snapshot.created', {
+      ...runLogBindings(run),
+      stepId: run.currentStepId,
+      snapshotSeq: snapshot.snapshotSeq,
+      status,
+      stepsUsed: state.stepsUsed,
+    });
   }
 
   private async generateModelResponse(run: AgentRun, state: ExecutionState): Promise<ModelResponse> {
-    const response = await this.options.model.generate({
+    const modelRequest = {
       messages: structuredClone(state.messages),
       tools: this.plannerVisibleTools(),
       outputSchema: state.outputSchema,
       metadata: run.metadata,
+    };
+    const startedAt = Date.now();
+    const timeoutContext = createAbortTimeoutContext(this.defaults.modelTimeoutMs);
+
+    this.logLifecycle('debug', 'model.request', {
+      ...runLogBindings(run),
+      stepId: run.currentStepId,
+      ...summarizeModelRequestForLog(modelRequest),
+    });
+
+    let response: ModelResponse;
+    try {
+      response = await this.options.model.generate({
+        ...modelRequest,
+        signal: timeoutContext.signal,
+      });
+    } catch (error) {
+      const modelError = timeoutContext.didTimeout()
+        ? createModelTimeoutError(this.defaults.modelTimeoutMs, error)
+        : error;
+      this.logLifecycle('error', 'model.failed', {
+        ...runLogBindings(run),
+        stepId: run.currentStepId,
+        durationMs: Date.now() - startedAt,
+        error: errorForLog(modelError),
+      });
+      throw modelError;
+    } finally {
+      timeoutContext.dispose();
+    }
+
+    this.logLifecycle('debug', 'model.response', {
+      ...runLogBindings(run),
+      stepId: run.currentStepId,
+      durationMs: Date.now() - startedAt,
+      ...summarizeModelResponseForLog(response),
     });
 
     if (response.usage) {
@@ -930,6 +1243,12 @@ export class AdaptiveAgent {
       payload: {
         usage: nextUsage as unknown as JsonValue,
       },
+    });
+
+    this.logLifecycle('debug', 'usage.updated', {
+      ...runLogBindings(updatedRun),
+      stepId: updatedRun.currentStepId,
+      usage: captureValueForLog(nextUsage, { mode: 'full' }),
     });
 
     return updatedRun;
@@ -980,6 +1299,15 @@ export class AdaptiveAgent {
       },
     });
 
+    this.logLifecycle('info', 'run.completed', {
+      ...runLogBindings(completedRun),
+      stepId: completedRun.currentStepId,
+      durationMs: this.runDurationMs(completedRun),
+      output: summarizeValueForLog(output),
+      stepsUsed: state.stepsUsed,
+      usage: captureValueForLog(completedRun.usage, { mode: 'full' }),
+    });
+
     return {
       status: 'success',
       runId: completedRun.id,
@@ -995,14 +1323,15 @@ export class AdaptiveAgent {
     error: string,
     code: RunFailureCode,
   ): Promise<RunResult> {
+    const currentRun = await this.refreshRun(run.id);
     const failedRun = await this.options.runStore.updateRun(
-      run.id,
+      currentRun.id,
       {
         status: code === 'REPLAN_REQUIRED' ? 'replan_required' : 'failed',
         errorCode: code,
         errorMessage: error,
       },
-      run.version,
+      currentRun.version,
     );
 
     await this.saveExecutionSnapshot(failedRun, state, failedRun.status);
@@ -1015,6 +1344,16 @@ export class AdaptiveAgent {
         error,
         code,
       },
+    });
+
+    this.logLifecycle(code === 'REPLAN_REQUIRED' ? 'warn' : 'error', code === 'REPLAN_REQUIRED' ? 'replan.required' : 'run.failed', {
+      ...runLogBindings(failedRun),
+      stepId: failedRun.currentStepId,
+      durationMs: this.runDurationMs(failedRun),
+      error,
+      code,
+      stepsUsed: state.stepsUsed,
+      usage: captureValueForLog(failedRun.usage, { mode: 'full' }),
     });
 
     return {
@@ -1080,6 +1419,13 @@ export class AdaptiveAgent {
       },
     });
 
+    this.logLifecycle('info', 'run.status_changed', {
+      ...runLogBindings(updatedRun),
+      stepId: updatedRun.currentStepId,
+      fromStatus: run.status,
+      toStatus: status,
+    });
+
     return updatedRun;
   }
 
@@ -1136,6 +1482,16 @@ export class AdaptiveAgent {
       },
     });
 
+    this.logLifecycle(code === 'REPLAN_REQUIRED' ? 'warn' : 'error', code === 'REPLAN_REQUIRED' ? 'replan.required' : 'run.failed', {
+      ...runLogBindings(failedRun),
+      stepId: failedRun.currentStepId,
+      planId: failedRun.currentPlanId,
+      planExecutionId: planExecution.id,
+      error,
+      code,
+      stepsUsed,
+    });
+
     return {
       status: 'failure',
       runId: failedRun.id,
@@ -1176,6 +1532,98 @@ export class AdaptiveAgent {
     return run;
   }
 
+  private logToolStarted(
+    run: AgentRun,
+    stepId: string,
+    tool: ToolDefinition,
+    input: JsonValue,
+    extra: Record<string, unknown> = {},
+  ): void {
+    this.logLifecycle('info', 'tool.started', {
+      ...runLogBindings(run),
+      stepId,
+      toolName: tool.name,
+      timeoutMs: tool.timeoutMs ?? this.defaults.toolTimeoutMs,
+      requiresApproval: tool.requiresApproval ?? false,
+      input: captureToolInputForLog(tool, input, this.defaultCaptureMode),
+      ...extra,
+    });
+  }
+
+  private logToolCompleted(
+    run: AgentRun,
+    stepId: string,
+    tool: ToolDefinition,
+    input: JsonValue,
+    output: JsonValue,
+    durationMs: number,
+    extra: Record<string, unknown> = {},
+  ): void {
+    this.logLifecycle('info', 'tool.completed', {
+      ...runLogBindings(run),
+      stepId,
+      toolName: tool.name,
+      durationMs,
+      input: captureToolInputForLog(tool, input, this.defaultCaptureMode),
+      output: captureToolOutputForLog(tool, output, this.defaultCaptureMode),
+      ...extra,
+    });
+  }
+
+  private logToolFailed(
+    run: AgentRun,
+    stepId: string,
+    tool: ToolDefinition,
+    input: JsonValue,
+    error: unknown,
+    durationMs: number,
+    extra: Record<string, unknown> = {},
+  ): void {
+    this.logLifecycle('error', 'tool.failed', {
+      ...runLogBindings(run),
+      stepId,
+      toolName: tool.name,
+      durationMs,
+      input: captureToolInputForLog(tool, input, this.defaultCaptureMode),
+      error: errorForLog(error),
+      ...extra,
+    });
+  }
+
+  private runDurationMs(run: Pick<AgentRun, 'createdAt'>): number {
+    return Date.now() - new Date(run.createdAt).getTime();
+  }
+
+  private logLifecycle(
+    level: 'debug' | 'info' | 'warn' | 'error',
+    event: string,
+    payload: Record<string, unknown>,
+  ): void {
+    if (!this.logger) {
+      return;
+    }
+
+    const entry = {
+      event,
+      ...payload,
+    };
+
+    switch (level) {
+      case 'debug':
+        this.logger.debug(entry, event);
+        return;
+      case 'info':
+        this.logger.info(entry, event);
+        return;
+      case 'warn':
+        this.logger.warn(entry, event);
+        return;
+      case 'error':
+        this.logger.error(entry, event);
+        return;
+    }
+  }
+
   private async emit(event: Omit<AgentEvent, 'id' | 'seq' | 'createdAt'>): Promise<void> {
     await this.eventEmitter.emit(event);
   }
@@ -1195,6 +1643,13 @@ class ToolExecutionError extends Error {
   }
 }
 
+class ModelTimeoutError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'TimeoutError';
+  }
+}
+
 function createCompositeEventSink(
   eventStore: AdaptiveAgentOptions['eventStore'],
   downstreamSink: AdaptiveAgentOptions['eventSink'],
@@ -1210,6 +1665,14 @@ function createCompositeEventSink(
       }
     },
   };
+}
+
+function resolveDefaultModelTimeoutMs(provider: string): number {
+  if (provider === 'ollama') {
+    return DEFAULT_AGENT_DEFAULTS.modelTimeoutMs * OLLAMA_MODEL_TIMEOUT_MULTIPLIER;
+  }
+
+  return DEFAULT_AGENT_DEFAULTS.modelTimeoutMs;
 }
 
 function buildInitialMessages(run: AgentRun, outputSchema?: JsonSchema, systemInstructions?: string): ModelMessage[] {
@@ -1259,6 +1722,10 @@ function serializeExecutionState(state: ExecutionState): JsonObject {
     serialized.pendingToolCall = serializePendingToolCall(state.pendingToolCalls[0]);
   }
 
+  if (state.approvedToolCallIds.length > 0) {
+    serialized.approvedToolCallIds = state.approvedToolCallIds;
+  }
+
   if (state.waitingOnChildRunId) {
     serialized.waitingOnChildRunId = state.waitingOnChildRunId;
   }
@@ -1283,6 +1750,7 @@ function deserializeExecutionState(value: JsonValue): ExecutionState | null {
     stepsUsed: value.stepsUsed,
     outputSchema: isJsonObject(value.outputSchema) ? (value.outputSchema as unknown as JsonSchema) : undefined,
     pendingToolCalls,
+    approvedToolCallIds: deserializeApprovedToolCallIds(value.approvedToolCallIds),
     waitingOnChildRunId: typeof value.waitingOnChildRunId === 'string' ? value.waitingOnChildRunId : undefined,
   };
 }
@@ -1332,6 +1800,26 @@ function deserializePendingToolCall(value: JsonValue | undefined): PendingToolCa
     stepId: value.stepId,
     needsStepStarted: value.needsStepStarted === true,
   };
+}
+
+function deserializeApprovedToolCallIds(value: JsonValue | undefined): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry): entry is string => typeof entry === 'string');
+}
+
+function addApprovedToolCallId(approvedToolCallIds: string[], toolCallId: string): string[] {
+  if (approvedToolCallIds.includes(toolCallId)) {
+    return approvedToolCallIds;
+  }
+
+  return [...approvedToolCallIds, toolCallId];
+}
+
+function removeApprovedToolCallId(approvedToolCallIds: string[], toolCallId: string): string[] {
+  return approvedToolCallIds.filter((approvedToolCallId) => approvedToolCallId !== toolCallId);
 }
 
 function isModelMessage(value: unknown): value is ModelMessage {
@@ -1602,6 +2090,45 @@ function isJsonValue(value: unknown): value is JsonValue {
 
 function stableJsonStringify(value: unknown): string {
   return JSON.stringify(value ?? null);
+}
+
+function recoverToolError<O extends JsonValue>(
+  tool: ToolDefinition<JsonValue, O>,
+  error: unknown,
+  input: JsonValue,
+): O | undefined {
+  return tool.recoverError?.(error, input);
+}
+
+function createAbortTimeoutContext(timeoutMs: number): {
+  signal: AbortSignal | undefined;
+  didTimeout: () => boolean;
+  dispose: () => void;
+} {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return {
+      signal: undefined,
+      didTimeout: () => false,
+      dispose: () => undefined,
+    };
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort(createModelTimeoutError(timeoutMs));
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    dispose: () => clearTimeout(timeoutId),
+  };
+}
+
+function createModelTimeoutError(timeoutMs: number, cause?: unknown): ModelTimeoutError {
+  return new ModelTimeoutError(`Model timed out after ${timeoutMs}ms`, cause === undefined ? undefined : { cause });
 }
 
 async function runWithTimeout<T>(timeoutMs: number, _signal: AbortSignal, task: () => Promise<T>): Promise<T> {

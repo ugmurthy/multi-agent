@@ -1,5 +1,10 @@
 {
   "name": "adaptive-agent-monorepo",
   "private": true,
-  "workspaces": ["packages/*"]
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "@types/marked-terminal": "^6.1.1",
+    "marked": "^17.0.5",
+    "marked-terminal": "^7.3.0"
+  }
 }

@@ -1,3 +1,7 @@
+import type { Logger } from 'pino';
+
+import { runLogBindings, summarizeRunResultForLog } from './logging.js';
+import { captureValueForLog, summarizeValueForLog } from './logger.js';
 import type {
   AgentDefaults,
   AgentRun,
@@ -81,6 +85,7 @@ export interface DelegationExecutorOptions {
   defaults?: AgentDefaults;
   runStore: RunStore;
   eventSink?: EventSink;
+  logger?: Logger;
   snapshotStore?: SnapshotStore;
   executeChildRun(request: ExecuteChildRunRequest): Promise<RunResult>;
 }
@@ -105,9 +110,11 @@ export class DelegationExecutor {
   private readonly hostToolsByName = new Map<string, ToolDefinition>();
   private readonly delegatesByName = new Map<string, DelegateDefinition>();
   private readonly policy: Required<DelegationPolicy>;
+  private readonly logger?: Logger;
 
   constructor(private readonly options: DelegationExecutorOptions) {
     this.policy = { ...DEFAULT_DELEGATION_POLICY, ...options.delegation };
+    this.logger = options.logger?.child({ component: 'adaptive-agent.delegation' });
 
     for (const tool of options.tools) {
       if (tool.name.startsWith(DELEGATE_TOOL_NAMESPACE)) {
@@ -145,6 +152,9 @@ export class DelegationExecutor {
       name: this.toDelegateToolName(delegate.name),
       description: delegate.description,
       inputSchema: delegateToolInputSchema,
+      // Child runs enforce their own model/tool timeouts, so the synthetic
+      // delegate tool should not also be capped by the parent's tool timeout.
+      timeoutMs: 0,
       execute: async (input, context) => this.executeDelegateTool(delegate, toDelegateToolInput(input), context),
     }));
   }
@@ -159,6 +169,19 @@ export class DelegationExecutor {
     const toolName = this.toDelegateToolName(delegate.name);
     const childRunId = crypto.randomUUID();
     const childDepth = parentContext.delegationDepth + 1;
+
+    this.logLifecycle('info', 'tool.started', {
+      runId: parentContext.runId,
+      rootRunId: parentContext.rootRunId,
+      parentRunId: parentContext.parentRunId,
+      delegateName: parentContext.delegateName,
+      delegationDepth: parentContext.delegationDepth,
+      stepId: parentContext.stepId,
+      toolName,
+      childRunId,
+      childDelegateName: delegate.name,
+      input: captureValueForLog(input, { mode: this.options.defaults?.capture ?? 'summary' }),
+    });
 
     await parentContext.emit({
       runId: parentContext.runId,
@@ -224,6 +247,16 @@ export class DelegationExecutor {
       delegationDepth: childDepth,
     } satisfies DelegateSpawnedPayload;
 
+    this.logLifecycle('info', 'delegate.spawned', {
+      ...delegatePayload,
+      allowedTools: delegate.allowedTools,
+      goal: summarizeValueForLog(input.goal),
+      input: captureValueForLog(input.input, { mode: this.options.defaults?.capture ?? 'summary' }),
+      context: captureValueForLog(input.context, { mode: this.options.defaults?.capture ?? 'summary' }),
+      metadata: captureValueForLog(input.metadata, { mode: 'summary' }),
+      outputSchema: input.outputSchema ? summarizeValueForLog(input.outputSchema) : undefined,
+    });
+
     await parentContext.emit({
       runId: parentContext.runId,
       stepId: parentContext.stepId,
@@ -263,6 +296,14 @@ export class DelegationExecutor {
       defaults: { ...this.options.defaults, ...delegate.defaults },
     });
 
+    this.logLifecycle('info', 'delegate.child_result', {
+      parentRunId: parentContext.runId,
+      childRunId,
+      delegateName: delegate.name,
+      toolName,
+      result: summarizeRunResultForLog(childResult),
+    });
+
     await this.materializeChildTerminalState(childRunId, childResult);
 
     const resolution = await this.resolveParentFromChild({
@@ -289,6 +330,12 @@ export class DelegationExecutor {
     if (!parentRun) {
       throw new Error(`Parent run ${parentRunId} does not exist`);
     }
+
+    this.logLifecycle('debug', 'delegate.resume_parent_requested', {
+      ...runLogBindings(parentRun),
+      status: parentRun.status,
+      stepId: parentRun.currentStepId,
+    });
 
     if (parentRun.status !== 'awaiting_subagent') {
       return { kind: 'not_waiting', parentRun };
@@ -317,6 +364,12 @@ export class DelegationExecutor {
     }
 
     if (!TERMINAL_RUN_STATUSES.has(childRun.status)) {
+      this.logLifecycle('debug', 'delegate.child_still_running', {
+        ...runLogBindings(parentRun),
+        childRunId,
+        childStatus: childRun.status,
+        reason: this.pendingReason(childRun.status),
+      });
       return {
         kind: 'waiting',
         parentRun,
@@ -376,7 +429,23 @@ export class DelegationExecutor {
         },
       });
 
+      this.logLifecycle('info', 'run.status_changed', {
+        ...runLogBindings(refreshedParent),
+        stepId: params.stepId,
+        fromStatus: parentRun.status,
+        toStatus: 'running',
+        childRunId: params.childRunId,
+      });
+
       if (mapped.kind === 'success') {
+        this.logLifecycle('info', 'tool.completed', {
+          ...runLogBindings(refreshedParent),
+          stepId: params.stepId,
+          toolName: params.toolName,
+          delegateName: params.delegateName,
+          childRunId: params.childRunId,
+          output: summarizeValueForLog(mapped.output),
+        });
         await this.emitParentToolEvent({
           parentContext: refreshedParent,
           stepId: params.stepId,
@@ -396,6 +465,16 @@ export class DelegationExecutor {
           output: mapped.output,
         };
       }
+
+      this.logLifecycle('error', 'tool.failed', {
+        ...runLogBindings(refreshedParent),
+        stepId: params.stepId,
+        toolName: params.toolName,
+        delegateName: params.delegateName,
+        childRunId: params.childRunId,
+        error: mapped.error,
+        code: mapped.code,
+      });
 
       await this.emitParentToolEvent({
         parentContext: refreshedParent,
@@ -467,6 +546,12 @@ export class DelegationExecutor {
         },
       });
 
+      this.logLifecycle('info', 'run.completed', {
+        ...runLogBindings(childRun),
+        output: summarizeValueForLog(result.output),
+        stepsUsed: result.stepsUsed,
+      });
+
       return;
     }
 
@@ -489,6 +574,12 @@ export class DelegationExecutor {
         error: failure.error,
         code: failure.code,
       },
+    });
+
+    this.logLifecycle('error', 'run.failed', {
+      ...runLogBindings(childRun),
+      error: failure.error,
+      code: failure.code,
     });
   }
 
@@ -531,6 +622,14 @@ export class DelegationExecutor {
         waitingOnDelegateName: delegateName,
       },
     });
+
+    this.logLifecycle('debug', 'snapshot.created', {
+      ...runLogBindings(parentRun),
+      stepId: parentRun.currentStepId,
+      status: 'awaiting_subagent',
+      waitingOnChildRunId: childRunId,
+      waitingOnDelegateName: delegateName,
+    });
   }
 
   private async getSnapshotChildRunId(runId: UUID): Promise<UUID | undefined> {
@@ -564,6 +663,13 @@ export class DelegationExecutor {
         error: message,
         code: 'TOOL_ERROR',
       },
+    });
+
+    this.logLifecycle('error', 'run.failed', {
+      ...runLogBindings(failedParent),
+      stepId: failedParent.currentStepId,
+      error: message,
+      code: 'TOOL_ERROR',
     });
 
     return failedParent;
@@ -718,6 +824,36 @@ export class DelegationExecutor {
 
   private toDelegateToolName(delegateName: string): string {
     return `${DELEGATE_TOOL_NAMESPACE}${delegateName}`;
+  }
+
+  private logLifecycle(
+    level: 'debug' | 'info' | 'warn' | 'error',
+    event: string,
+    payload: Record<string, unknown>,
+  ): void {
+    if (!this.logger) {
+      return;
+    }
+
+    const entry = {
+      event,
+      ...payload,
+    };
+
+    switch (level) {
+      case 'debug':
+        this.logger.debug(entry, event);
+        return;
+      case 'info':
+        this.logger.info(entry, event);
+        return;
+      case 'warn':
+        this.logger.warn(entry, event);
+        return;
+      case 'error':
+        this.logger.error(entry, event);
+        return;
+    }
   }
 }
 

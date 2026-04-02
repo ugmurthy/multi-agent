@@ -6,5 +6,6 @@ export * from './in-memory-run-store.js';
 export * from './in-memory-snapshot-store.js';
 export * from './delegation-executor.js';
 export * from './adapters/index.js';
+export * from './logger.js';
 export * from './tools/index.js';
 export * from './skills/index.js';

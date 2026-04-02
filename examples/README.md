@@ -14,9 +14,13 @@ Edit `.env` and fill in the keys you need:
 |----------|----------|---------|
 | `OPENROUTER_API_KEY` | If using OpenRouter | [Get key →](https://openrouter.ai/keys) |
 | `MISTRAL_API_KEY` | If using Mistral | [Get key →](https://console.mistral.ai/api-keys) |
-| `BRAVE_SEARCH_API_KEY` | For web search tools | [Get key →](https://api.search.brave.com/app/keys) |
+| `WEB_SEARCH_PROVIDER` | Optional | Set to `brave` or `duckduckgo` for `web_search` |
+| `BRAVE_SEARCH_API_KEY` | If `WEB_SEARCH_PROVIDER=brave` | [Get key →](https://api.search.brave.com/app/keys) |
+| `AGENT_MAX_STEPS` | Optional | Override the sample agent's max steps; when unset it uses the core default of 30 |
+| `WEB_TOOL_TIMEOUT_MS` | Optional | Override the timeout for `web_search` and `read_web_page` in milliseconds |
+| `MODEL_TIMEOUT_MS` | Optional | Override the agent-side timeout for each model turn in milliseconds; set to `0` to disable |
 
-**Ollama requires no API key** — just have it running locally (`ollama serve`).
+**Ollama requires no API key** — just have it running locally (`ollama serve`). The example now relies on the runtime's longer default model timeout for `ollama` because local inference can take longer.
 
 ### 2. Ensure Ollama is running (for local usage)
 
@@ -45,6 +49,19 @@ PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-... bun run examples/run-agent.ts
 
 # Use Mistral
 PROVIDER=mistral MISTRAL_API_KEY=... bun run examples/run-agent.ts
+
+# Use DuckDuckGo for web_search instead of Brave
+WEB_SEARCH_PROVIDER=duckduckgo bun run examples/run-agent.ts
+
+# Give web tools more time for slower sites
+WEB_TOOL_TIMEOUT_MS=120000 bun run examples/run-agent.ts
+
+# Allow longer delegated research runs before MAX_STEPS
+AGENT_MAX_STEPS=60 bun run examples/run-agent.ts
+
+# Let model turns run longer, or disable the agent-side timeout entirely
+MODEL_TIMEOUT_MS=300000 bun run examples/run-agent.ts
+MODEL_TIMEOUT_MS=0 bun run examples/run-agent.ts
 ```
 
 ## What the sample does
@@ -67,4 +84,4 @@ examples/skills/
 
 Skills are automatically converted to delegate profiles (`delegate.researcher`, `delegate.file-analyst`). The agent can choose to invoke them when it determines a sub-agent is appropriate for part of the task.
 
-Skills whose required tools are unavailable (e.g. `researcher` when `BRAVE_SEARCH_API_KEY` is missing) are skipped automatically.
+Skills whose required tools are unavailable (e.g. `researcher` when `WEB_SEARCH_PROVIDER=brave` and `BRAVE_SEARCH_API_KEY` is missing) are skipped automatically.
