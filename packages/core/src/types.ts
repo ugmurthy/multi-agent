@@ -80,6 +80,8 @@ export interface AgentDefaults {
   modelTimeoutMs?: number;
   maxRetriesPerStep?: number;
   requireApprovalForWriteTools?: boolean;
+  /** When true, tools with `requiresApproval` are executed without pausing for approval. */
+  autoApproveAll?: boolean;
   capture?: CaptureMode;
 }
 

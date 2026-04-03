@@ -29,9 +29,18 @@
  *
  *   # Allow more model/tool turns before MAX_STEPS
  *   AGENT_MAX_STEPS=60 bun run examples/run-agent.ts
+ *
+ *   # Enable lifecycle logging explicitly (default is silent)
+ *   AGENT_LOG_LEVEL=info bun run examples/run-agent.ts
+ *
+ *   # Write structured logs to PROJECT_ROOT/logs/adaptive-agent-example.log
+ *   LOG_DEST=file AGENT_LOG_LEVEL=info bun run examples/run-agent.ts
+ *
+ *   # Mirror logs to console and file, with a custom log directory
+ *   LOG_DEST=both LOG_DIR=./tmp/logs AGENT_LOG_LEVEL=debug bun run examples/run-agent.ts
  */
 
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { stdin as input, stdout as output } from 'node:process';
 import { createInterface } from 'node:readline/promises';
 
@@ -43,11 +52,17 @@ import { createModelAdapter } from '../packages/core/src/adapters/create-model-a
 import { createReadFileTool } from '../packages/core/src/tools/read-file.js';
 import { createListDirectoryTool } from '../packages/core/src/tools/list-directory.js';
 import { createWriteFileTool } from '../packages/core/src/tools/write-file.js';
+import { createShellExecTool } from '../packages/core/src/tools/shell-exec.js';
 import { createWebSearchTool } from '../packages/core/src/tools/web-search.js';
 import { createReadWebPageTool } from '../packages/core/src/tools/read-web-page.js';
 import { loadSkillFromDirectory } from '../packages/core/src/skills/load-skill.js';
 import { skillToDelegate } from '../packages/core/src/skills/skill-to-delegate.js';
-import { createAdaptiveAgentLogger } from '../packages/core/src/logger.js';
+import {
+  createAdaptiveAgentLogger,
+  DEFAULT_LOG_DESTINATION,
+  DEFAULT_LOG_LEVEL,
+  type AdaptiveAgentLogDestination,
+} from '../packages/core/src/logger.js';
 import type { DelegateDefinition, RunResult, ToolDefinition } from '../packages/core/src/types.js';
 //-markdown//
 import { marked } from 'marked';
@@ -72,10 +87,15 @@ const verbose = cliArgs.includes('--verbose') || cliArgs.includes('-v');
 const autoApprove = cliArgs.includes('--auto-approve') || process.env.AUTO_APPROVE === '1';
 const positionalArgs = cliArgs.filter((arg) => !['--verbose', '-v', '--auto-approve'].includes(arg));
 const webSearchProviderEnv = process.env.WEB_SEARCH_PROVIDER;
+const logDestinationEnv = process.env.LOG_DEST;
 const webSearchProvider =
   webSearchProviderEnv === 'duckduckgo' || webSearchProviderEnv === 'brave'
     ? webSearchProviderEnv
     : 'brave';
+const logDestination = parseLogDestination(logDestinationEnv);
+const logDir = resolveLogDir(process.env.LOG_DIR);
+const logFilePath = resolve(logDir, 'adaptive-agent-example.log');
+const agentLogLevel = process.env.AGENT_LOG_LEVEL ?? (verbose ? 'debug' : DEFAULT_LOG_LEVEL);
 const maxSteps = parseOptionalPositiveInt(process.env.AGENT_MAX_STEPS);
 const webToolTimeoutMs = parseOptionalPositiveInt(process.env.WEB_TOOL_TIMEOUT_MS);
 const modelTimeoutMs = parseOptionalNonNegativeInt(process.env.MODEL_TIMEOUT_MS);
@@ -98,10 +118,15 @@ const tools: ToolDefinition[] = [
   createReadFileTool({ allowedRoot: PROJECT_ROOT }),
   createListDirectoryTool({ allowedRoot: PROJECT_ROOT }),
   createWriteFileTool({ allowedRoot: resolve(PROJECT_ROOT, 'artifacts') }),
+  createShellExecTool({ cwd: PROJECT_ROOT }),
 ];
 
 if (webSearchProviderEnv && webSearchProviderEnv !== webSearchProvider) {
   console.warn(`⚠️  Unknown WEB_SEARCH_PROVIDER='${webSearchProviderEnv}', defaulting to brave`);
+}
+
+if (logDestinationEnv && logDestinationEnv !== logDestination) {
+  console.warn(`⚠️  Unknown LOG_DEST='${logDestinationEnv}', defaulting to ${DEFAULT_LOG_DESTINATION}`);
 }
 
 if (process.env.WEB_TOOL_TIMEOUT_MS && webToolTimeoutMs === undefined) {
@@ -168,6 +193,7 @@ async function tryLoadSkill(skillDir: string, requiredTools: string[]): Promise<
 
 await tryLoadSkill(resolve(SKILLS_DIR, 'researcher'), ['web_search', 'read_web_page']);
 await tryLoadSkill(resolve(SKILLS_DIR, 'file-analyst'), ['read_file', 'list_directory']);
+await tryLoadSkill(resolve(SKILLS_DIR, 'shell-exec'), ['shell_exec']);
 
 // ─── Create the agent ───────────────────────────────────────────────────────
 
@@ -176,9 +202,15 @@ const eventStore = new InMemoryEventStore();
 const snapshotStore = new InMemorySnapshotStore();
 const logger = createAdaptiveAgentLogger({
   name: 'adaptive-agent-example',
-  level: process.env.AGENT_LOG_LEVEL ?? (verbose ? 'debug' : 'info'),
+  destination: logDestination,
+  ...(logDestination === 'file' || logDestination === 'both' ? { filePath: logFilePath } : {}),
+  level: agentLogLevel,
   pretty: process.stdout.isTTY,
 });
+
+if (logDestination === 'file' || logDestination === 'both') {
+  console.log(`🪵 Logs:     ${logDestination} (${logFilePath}, level=${agentLogLevel})`);
+}
 
 const agent = new AdaptiveAgent({
   model,
@@ -196,6 +228,7 @@ const agent = new AdaptiveAgent({
     ...(maxSteps === undefined ? {} : { maxSteps }),
     toolTimeoutMs: 30_000,
     ...(modelTimeoutMs === undefined ? {} : { modelTimeoutMs }),
+    autoApproveAll: autoApprove,
     capture: verbose ? 'full' : 'summary',
   },
 });
@@ -258,6 +291,23 @@ function parseOptionalNonNegativeInt(value: string | undefined): number | undefi
   }
 
   return parsed;
+}
+
+function parseLogDestination(value: string | undefined): AdaptiveAgentLogDestination {
+  if (value === 'console' || value === 'file' || value === 'both') {
+    return value;
+  }
+
+  return DEFAULT_LOG_DESTINATION;
+}
+
+function resolveLogDir(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return resolve(PROJECT_ROOT, 'logs');
+  }
+
+  return isAbsolute(trimmed) ? trimmed : resolve(PROJECT_ROOT, trimmed);
 }
 
 function printResult(result: RunResult, elapsedSeconds: string): void {

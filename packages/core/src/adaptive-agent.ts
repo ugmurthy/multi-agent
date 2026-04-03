@@ -321,7 +321,7 @@ export class AdaptiveAgent {
           },
         });
 
-        if (tool.requiresApproval || step.requiresApproval) {
+        if ((tool.requiresApproval || step.requiresApproval) && !this.options.defaults?.autoApproveAll) {
           currentRun = await this.transitionRun(currentRun, 'awaiting_approval');
           currentExecution = await planStore.updateExecution(currentExecution.id, {
             status: 'awaiting_approval',
@@ -871,7 +871,7 @@ export class AdaptiveAgent {
       throw new Error(`Unknown tool ${pendingToolCall.name}`);
     }
 
-    if (tool.requiresApproval && !state.approvedToolCallIds.includes(pendingToolCall.id)) {
+    if (tool.requiresApproval && !this.options.defaults?.autoApproveAll && !state.approvedToolCallIds.includes(pendingToolCall.id)) {
       const awaitingApprovalRun = await this.transitionRun(run, 'awaiting_approval');
       this.logLifecycle('warn', 'approval.requested', {
         ...runLogBindings(awaitingApprovalRun),

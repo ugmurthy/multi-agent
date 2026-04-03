@@ -1,37 +1,83 @@
-import pino, { type Logger, type LoggerOptions } from 'pino';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+import pino, { type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import pretty from 'pino-pretty';
 
 import type { CaptureMode, JsonValue } from './types.js';
 
 export type AdaptiveAgentLogger = Logger;
+export type AdaptiveAgentLogLevel = LoggerOptions['level'] | 'silent';
+export type AdaptiveAgentLogDestination = 'console' | 'file' | 'both';
+export const DEFAULT_LOG_LEVEL: AdaptiveAgentLogLevel = 'silent';
+export const DEFAULT_LOG_DESTINATION: AdaptiveAgentLogDestination = 'console';
 
 export interface AdaptiveAgentLoggerOptions {
-  level?: LoggerOptions['level'];
+  level?: AdaptiveAgentLogLevel;
+  destination?: AdaptiveAgentLogDestination;
+  filePath?: string;
   name?: string;
   pretty?: boolean;
 }
 
 export function createAdaptiveAgentLogger(options: AdaptiveAgentLoggerOptions = {}): AdaptiveAgentLogger {
-  const destination = options.pretty === false
-    ? undefined
-    : pretty({
-        colorize: true,
-        ignore: 'pid,hostname',
-        translateTime: 'HH:MM:ss.l',
-        singleLine: false,
-      });
+  const destination = options.destination ?? DEFAULT_LOG_DESTINATION;
+  const loggerOptions: LoggerOptions = {
+    name: options.name ?? 'adaptive-agent',
+    level: options.level ?? DEFAULT_LOG_LEVEL,
+    base: undefined,
+    serializers: {
+      err: pino.stdSerializers.err,
+    },
+  };
+
+  if (destination === 'console') {
+    const consoleDestination = createConsoleDestination(options.pretty);
+    return consoleDestination ? pino(loggerOptions, consoleDestination) : pino(loggerOptions);
+  }
+
+  const fileDestination = createFileDestination(requireLogFilePath(options, destination));
+  if (destination === 'file') {
+    return pino(loggerOptions, fileDestination);
+  }
 
   return pino(
-    {
-      name: options.name ?? 'adaptive-agent',
-      level: options.level ?? 'info',
-      base: undefined,
-      serializers: {
-        err: pino.stdSerializers.err,
-      },
-    },
-    destination,
+    loggerOptions,
+    pino.multistream([
+      { stream: createConsoleStream(options.pretty) },
+      { stream: fileDestination },
+    ]),
   );
+}
+
+function createConsoleDestination(prettyEnabled: boolean | undefined): DestinationStream | undefined {
+  return prettyEnabled === false ? undefined : createPrettyDestination();
+}
+
+function createConsoleStream(prettyEnabled: boolean | undefined): DestinationStream {
+  return prettyEnabled === false ? pino.destination(1) : createPrettyDestination();
+}
+
+function createPrettyDestination(): DestinationStream {
+  return pretty({
+    colorize: true,
+    ignore: 'pid,hostname',
+    translateTime: 'HH:MM:ss.l',
+    singleLine: false,
+  });
+}
+
+function createFileDestination(filePath: string): DestinationStream {
+  mkdirSync(dirname(filePath), { recursive: true });
+  return pino.destination({ dest: filePath, sync: true });
+}
+
+function requireLogFilePath(options: AdaptiveAgentLoggerOptions, destination: AdaptiveAgentLogDestination): string {
+  if (!options.filePath) {
+    throw new Error(`createAdaptiveAgentLogger() requires filePath when destination='${destination}'`);
+  }
+
+  return options.filePath;
 }
 
 export function captureValueForLog(
