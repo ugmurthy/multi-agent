@@ -20,6 +20,7 @@ Implemented in the prototype today:
 - model adapters for Ollama, OpenRouter, and Mistral
 - structured runtime logging with Pino
 - skill loading from `SKILL.md` files and conversion into delegate profiles
+- executable skills with dynamically imported handler modules (handler-as-tool)
 - built-in file, shell, and web tools
 
 Not implemented yet:
@@ -51,7 +52,7 @@ Not implemented yet:
 - in-memory stores for runs, events, snapshots, and plans
 - model adapters for Ollama, OpenRouter, and Mistral
 - built-in tools including `read_file`, `list_directory`, `write_file`, `shell_exec`, `web_search`, and `read_web_page`
-- skill parsing utilities that load `SKILL.md` files and turn them into delegate definitions
+- skill parsing utilities that load `SKILL.md` files and turn them into delegate definitions, with optional handler module loading for executable skills
 - structured logging helpers for model requests, tool calls, outputs, and delegation lifecycle events
 
 The delegation model follows the v1.4 design boundary: tools remain the only first-class executable primitive, and delegation is represented as synthetic `delegate.<name>` tools plus normal child runs.
@@ -143,11 +144,45 @@ The sample runtime can load skills from Markdown files with YAML frontmatter:
 
 ```text
 examples/skills/
+|- bmi-calculator/SKILL.md + handler.ts
 |- file-analyst/SKILL.md
-`- researcher/SKILL.md
+|- researcher/SKILL.md
+`- shell-exec/SKILL.md
 ```
 
 Each skill is parsed into a `SkillDefinition` and then converted into a delegate profile. At runtime, that profile is exposed to the model as a synthetic tool such as `delegate.file-analyst` or `delegate.researcher`.
+
+### Executable Skills (Handler-as-Tool)
+
+Skills can optionally include a `handler` field in their frontmatter that points to a TypeScript module. When set, the module is dynamically imported at load time and exposed as a scoped tool inside the child run. This lets skills bundle deterministic code alongside LLM-driven reasoning.
+
+Example `SKILL.md` with a handler:
+
+```yaml
+---
+name: bmi-calculator
+description: Calculate BMI from height (cm) and weight (kg)
+handler: handler.ts
+allowedTools:
+  - write_file
+---
+```
+
+The handler module exports named fields matching the `ToolDefinition` shape:
+
+```ts
+export const name = 'bmi_calculate';
+export const description = 'Calculate BMI from height and weight';
+export const inputSchema = { /* JSON Schema */ };
+export async function execute(input, context) {
+  // deterministic computation
+  return { bmi: 22.5, category: 'Normal weight' };
+}
+```
+
+When the child run executes, the LLM can call both the handler tool (`bmi_calculate`) and any host tools listed in `allowedTools` (`write_file`). The handler tool name defaults to `skill.<name>.handler` if the module does not export a `name`.
+
+A working example is included at `examples/skills/bmi-calculator/`.
 
 This keeps delegation aligned with the core design:
 
@@ -155,6 +190,7 @@ This keeps delegation aligned with the core design:
 - child work happens in a separate run
 - parent and child runs keep separate events and snapshots
 - the parent resumes only after the child returns a structured result
+- handler tools are just `ToolDefinition` instances — no new execution primitive
 
 ## Built-In Tools
 

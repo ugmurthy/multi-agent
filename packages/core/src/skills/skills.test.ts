@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { loadSkillFromDirectory, loadSkillFromFile, parseSkillMarkdown, SkillLoadError } from './load-skill.js';
 import { skillToDelegate, skillsToDelegate } from './skill-to-delegate.js';
 import type { SkillDefinition } from './types.js';
+import type { ToolDefinition } from '../types.js';
 
 // ── parseSkillMarkdown ──────────────────────────────────────────────────────
 
@@ -193,6 +194,35 @@ Body.
     expect(skill.name).toBe('commented');
     expect(skill.description).toBe('Has comments');
   });
+
+  it('parses handler field from frontmatter', () => {
+    const md = `---
+name: calculator
+description: Calculate things
+handler: handler.ts
+---
+
+Calculate stuff.
+`;
+
+    const skill = parseSkillMarkdown(md, 'test');
+
+    expect(skill.handler).toBe('handler.ts');
+  });
+
+  it('sets handler to undefined when not present', () => {
+    const md = `---
+name: plain
+description: No handler
+---
+
+Just instructions.
+`;
+
+    const skill = parseSkillMarkdown(md, 'test');
+
+    expect(skill.handler).toBeUndefined();
+  });
 });
 
 // ── loadSkillFromDirectory / loadSkillFromFile ───────────────────────────────
@@ -258,6 +288,140 @@ Write well.
     });
 
     expect(skill.allowedTools).toEqual(['write_file', 'read_file']);
+  });
+
+  it('loads a handler module and populates handlerTools', async () => {
+    const skillDir = join(tempDir, 'calc');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: calc
+description: A calculator
+handler: handler.ts
+---
+
+Calculate things.
+`,
+    );
+    await writeFile(
+      join(skillDir, 'handler.ts'),
+      `
+export const name = 'calc_add';
+export const description = 'Add two numbers';
+export const inputSchema = {
+  type: 'object',
+  required: ['a', 'b'],
+  properties: { a: { type: 'number' }, b: { type: 'number' } },
+};
+export async function execute(input) {
+  return { result: input.a + input.b };
+}
+`,
+    );
+
+    const skill = await loadSkillFromDirectory(skillDir);
+
+    expect(skill.handler).toBe('handler.ts');
+    expect(skill.handlerTools).toHaveLength(1);
+
+    const tool = skill.handlerTools![0];
+    expect(tool.name).toBe('calc_add');
+    expect(tool.description).toBe('Add two numbers');
+
+    const output = await tool.execute({ a: 2, b: 3 } as any, {} as any);
+    expect(output).toEqual({ result: 5 });
+  });
+
+  it('uses default tool name when handler does not export name', async () => {
+    const skillDir = join(tempDir, 'anon');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: anon-skill
+description: Anonymous handler
+handler: handler.ts
+---
+
+Do things.
+`,
+    );
+    await writeFile(
+      join(skillDir, 'handler.ts'),
+      `
+export async function execute(input) {
+  return { ok: true };
+}
+`,
+    );
+
+    const skill = await loadSkillFromDirectory(skillDir);
+
+    expect(skill.handlerTools).toHaveLength(1);
+    expect(skill.handlerTools![0].name).toBe('skill.anon-skill.handler');
+  });
+
+  it('throws when handler module does not exist', async () => {
+    const skillDir = join(tempDir, 'missing');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: missing
+description: Missing handler
+handler: not-here.ts
+---
+
+Instructions.
+`,
+    );
+
+    await expect(loadSkillFromDirectory(skillDir)).rejects.toThrow(SkillLoadError);
+    await expect(loadSkillFromDirectory(skillDir)).rejects.toThrow('not found');
+  });
+
+  it('throws when handler module does not export execute', async () => {
+    const skillDir = join(tempDir, 'no-exec');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: no-exec
+description: No execute export
+handler: handler.ts
+---
+
+Instructions.
+`,
+    );
+    await writeFile(
+      join(skillDir, 'handler.ts'),
+      `export const name = 'broken';`,
+    );
+
+    await expect(loadSkillFromDirectory(skillDir)).rejects.toThrow(SkillLoadError);
+    await expect(loadSkillFromDirectory(skillDir)).rejects.toThrow('must export an execute');
+  });
+
+  it('does not populate handlerTools when handler is absent', async () => {
+    const skillDir = join(tempDir, 'no-handler');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: no-handler
+description: Context only
+---
+
+Just instructions.
+`,
+    );
+
+    const skill = await loadSkillFromDirectory(skillDir);
+
+    expect(skill.handler).toBeUndefined();
+    expect(skill.handlerTools).toBeUndefined();
   });
 });
 
@@ -344,6 +508,31 @@ describe('skillToDelegate', () => {
     expect(delegate).not.toHaveProperty('triggers');
     expect(delegate).not.toHaveProperty('inputSchema');
     expect(delegate).not.toHaveProperty('outputSchema');
+  });
+
+  it('carries handlerTools through to the delegate', () => {
+    const handlerTool: ToolDefinition = {
+      name: 'skill.researcher.handler',
+      description: 'Handler tool',
+      inputSchema: { type: 'object' },
+      execute: async () => ({ ok: true }),
+    };
+
+    const skill: SkillDefinition = {
+      ...baseSkill,
+      handlerTools: [handlerTool],
+    };
+
+    const delegate = skillToDelegate(skill);
+
+    expect(delegate.handlerTools).toHaveLength(1);
+    expect(delegate.handlerTools![0].name).toBe('skill.researcher.handler');
+  });
+
+  it('sets handlerTools to undefined when skill has no handler', () => {
+    const delegate = skillToDelegate(baseSkill);
+
+    expect(delegate.handlerTools).toBeUndefined();
   });
 });
 

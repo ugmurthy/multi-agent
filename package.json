@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": ["packages/*"],
   "dependencies": {
+    "@e2b/code-interpreter": "^2.4.0",
     "@types/marked-terminal": "^6.1.1",
     "marked": "^17.0.5",
     "marked-terminal": "^7.3.0"

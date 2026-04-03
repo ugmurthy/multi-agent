@@ -133,6 +133,8 @@ export interface DelegateDefinition {
   allowedTools: string[];
   model?: ModelAdapter;
   defaults?: Partial<AgentDefaults>;
+  /** Extra tools injected into the child run (e.g. from executable skill handlers). */
+  handlerTools?: ToolDefinition[];
 }
 
 export interface DelegateToolInput {

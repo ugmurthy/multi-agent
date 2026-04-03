@@ -16,6 +16,7 @@ export function skillToDelegate(skill: SkillDefinition): DelegateDefinition {
     allowedTools: skill.allowedTools,
     model: skill.model,
     defaults: skill.defaults,
+    handlerTools: skill.handlerTools,
   };
 }
 

@@ -40,6 +40,14 @@ export function createWriteFileTool(config?: WriteFileToolConfig): ToolDefinitio
     requiresApproval: true,
     async execute(input) {
       const { path: filePath, content } = input as unknown as WriteFileInput;
+
+      if (typeof filePath !== 'string' || !filePath.trim()) {
+        throw new Error('write_file requires a non-empty "path" string');
+      }
+      if (typeof content !== 'string') {
+        throw new Error('write_file requires a "content" string');
+      }
+
       const resolved = resolve(allowedRoot, filePath);
 
       if (!resolved.startsWith(resolve(allowedRoot))) {

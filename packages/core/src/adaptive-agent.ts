@@ -1057,9 +1057,11 @@ export class AdaptiveAgent {
 
   private createScopedAgent(delegate: NonNullable<AdaptiveAgentOptions['delegates']>[number]): AdaptiveAgent {
     const recursiveDelegates = this.options.delegation?.allowRecursiveDelegation ? this.options.delegates : [];
+    const hostTools = this.pickHostTools(delegate.allowedTools);
+    const tools = delegate.handlerTools ? [...hostTools, ...delegate.handlerTools] : hostTools;
     return new AdaptiveAgent({
       model: delegate.model ?? this.options.model,
-      tools: this.pickHostTools(delegate.allowedTools),
+      tools,
       delegates: recursiveDelegates,
       delegation: this.options.delegation,
       runStore: this.options.runStore,

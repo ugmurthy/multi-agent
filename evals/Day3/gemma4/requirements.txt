@@ -1,0 +1,15 @@
+# Requirements for RF-DETR + Gemma 4 Scene Summarization Prototype
+
+# Object Detection with RF-DETR
+inference>=6.0.0
+supervision>=0.25.0
+
+# Gemma 4 via Gemini API
+google-genai>=1.0.0
+
+# Image handling
+Pillow>=10.0.0
+
+# Optional: for video processing (if needed)
+opencv-python>=4.10.0
+numpy>=1.26.0

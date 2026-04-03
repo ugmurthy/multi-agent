@@ -253,7 +253,20 @@ function toOpenAITool(
 
 function parseToolArguments(args: string): JsonValue {
   try {
-    return JSON.parse(args) as JsonValue;
+    let parsed = JSON.parse(args) as JsonValue;
+    // Some models double-serialize tool arguments as a JSON string.
+    // Unwrap one level if the result is a string that parses to an object.
+    if (typeof parsed === 'string') {
+      try {
+        const inner = JSON.parse(parsed);
+        if (typeof inner === 'object' && inner !== null) {
+          parsed = inner as JsonValue;
+        }
+      } catch {
+        // not double-encoded — keep the string
+      }
+    }
+    return parsed;
   } catch {
     return args;
   }

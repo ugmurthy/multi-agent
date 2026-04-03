@@ -40,6 +40,7 @@
  *   LOG_DEST=both LOG_DIR=./tmp/logs AGENT_LOG_LEVEL=debug bun run examples/run-agent.ts
  */
 
+import { readdir } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { stdin as input, stdout as output } from 'node:process';
 import { createInterface } from 'node:readline/promises';
@@ -174,26 +175,23 @@ if (modelTimeoutMs !== undefined) {
 
 const delegates: DelegateDefinition[] = [];
 
-async function tryLoadSkill(skillDir: string, requiredTools: string[]): Promise<void> {
-  const available = requiredTools.every((t) => tools.some((tool) => tool.name === t));
-  if (!available) {
-    const skillName = skillDir.split('/').pop();
-    console.log(`⏭️  Skipping skill '${skillName}' (missing tools: ${requiredTools.filter((t) => !tools.some((tool) => tool.name === t)).join(', ')})`);
-    return;
-  }
-
+const skillEntries = await readdir(SKILLS_DIR, { withFileTypes: true });
+for (const entry of skillEntries) {
+  if (!entry.isDirectory()) continue;
+  const skillDir = resolve(SKILLS_DIR, entry.name);
   try {
     const skill = await loadSkillFromDirectory(skillDir);
+    const missing = skill.allowedTools.filter((t) => !tools.some((tool) => tool.name === t));
+    if (missing.length > 0) {
+      console.log(`⏭️  Skipping skill '${skill.name}' (missing tools: ${missing.join(', ')})`);
+      continue;
+    }
     delegates.push(skillToDelegate(skill));
     console.log(`📋 Loaded skill: ${skill.name} → delegate.${skill.name}`);
   } catch (error) {
-    console.warn(`⚠️  Failed to load skill from ${skillDir}:`, error);
+    console.warn(`⚠️  Failed to load skill from ${entry.name}:`, error);
   }
 }
-
-await tryLoadSkill(resolve(SKILLS_DIR, 'researcher'), ['web_search', 'read_web_page']);
-await tryLoadSkill(resolve(SKILLS_DIR, 'file-analyst'), ['read_file', 'list_directory']);
-await tryLoadSkill(resolve(SKILLS_DIR, 'shell-exec'), ['shell_exec']);
 
 // ─── Create the agent ───────────────────────────────────────────────────────
 
@@ -201,7 +199,7 @@ const runStore = new InMemoryRunStore();
 const eventStore = new InMemoryEventStore();
 const snapshotStore = new InMemorySnapshotStore();
 const logger = createAdaptiveAgentLogger({
-  name: 'adaptive-agent-example',
+  name: 'adaptive-agent-example'+process.env.RUN_SUFFIX,
   destination: logDestination,
   ...(logDestination === 'file' || logDestination === 'both' ? { filePath: logFilePath } : {}),
   level: agentLogLevel,
@@ -218,7 +216,7 @@ const agent = new AdaptiveAgent({
   delegates,
   delegation: {
     maxDepth: 1,
-    maxChildrenPerRun: 5,
+    maxChildrenPerRun: 7,
   },
   runStore,
   eventStore,

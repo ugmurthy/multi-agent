@@ -1,6 +1,7 @@
-import { readFile } from 'node:fs/promises';
-import { join, basename } from 'node:path';
+import { readFile, access } from 'node:fs/promises';
+import { join, basename, resolve } from 'node:path';
 
+import type { ToolDefinition, JsonValue } from '../types.js';
 import type { SkillDefinition } from './types.js';
 
 export interface LoadSkillOptions {
@@ -15,10 +16,13 @@ export interface LoadSkillOptions {
  * Markdown body as the skill instructions.
  *
  * Required frontmatter fields: `name`, `description`.
- * Optional frontmatter fields: `triggers`, `allowedTools`.
+ * Optional frontmatter fields: `triggers`, `allowedTools`, `handler`.
  *
  * `allowedTools` can be specified in frontmatter or passed via `options`.
  * The `options` value takes precedence.
+ *
+ * When `handler` is set in frontmatter, the module is dynamically imported
+ * from the skill directory and exposed as a scoped tool in the child run.
  */
 export async function loadSkillFromDirectory(
   skillDir: string,
@@ -26,7 +30,16 @@ export async function loadSkillFromDirectory(
 ): Promise<SkillDefinition> {
   const skillPath = join(skillDir, 'SKILL.md');
   const raw = await readFile(skillPath, 'utf-8');
-  return parseSkillMarkdown(raw, skillDir, options);
+  const skill = parseSkillMarkdown(raw, skillDir, options);
+
+  if (skill.handler) {
+    const handlerPath = resolve(skillDir, skill.handler);
+    await assertFileExists(handlerPath, skillDir);
+    const handlerTool = await loadHandlerModule(handlerPath, skill.name, skillDir);
+    skill.handlerTools = [handlerTool];
+  }
+
+  return skill;
 }
 
 /**
@@ -67,12 +80,15 @@ export function parseSkillMarkdown(
     throw new SkillLoadError(`SKILL.md at ${source} has no instruction body after frontmatter`);
   }
 
+  const handler = typeof meta.handler === 'string' && meta.handler ? meta.handler : undefined;
+
   return {
     name,
     description,
     instructions,
     allowedTools,
     triggers: triggers && triggers.length > 0 ? triggers : undefined,
+    handler,
   };
 }
 
@@ -192,4 +208,58 @@ function parseStringArray(value: unknown): string[] | undefined {
   }
 
   return undefined;
+}
+
+// ── handler loading ─────────────────────────────────────────────────────────
+
+/**
+ * Expected shape of a handler module's default export.
+ */
+interface SkillHandlerExport {
+  name?: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  execute(input: JsonValue, context: unknown): Promise<JsonValue>;
+}
+
+async function assertFileExists(filePath: string, skillDir: string): Promise<void> {
+  try {
+    await access(filePath);
+  } catch {
+    throw new SkillLoadError(`Handler module '${filePath}' not found in skill directory ${skillDir}`);
+  }
+}
+
+async function loadHandlerModule(
+  handlerPath: string,
+  skillName: string,
+  skillDir: string,
+): Promise<ToolDefinition> {
+  let mod: Record<string, unknown>;
+  try {
+    mod = await import(handlerPath);
+  } catch (error) {
+    throw new SkillLoadError(
+      `Failed to import handler module '${handlerPath}' for skill '${skillName}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const handler = (mod.default ?? mod) as Partial<SkillHandlerExport>;
+
+  if (typeof handler.execute !== 'function') {
+    throw new SkillLoadError(
+      `Handler module '${handlerPath}' for skill '${skillName}' must export an execute(input, context) function`,
+    );
+  }
+
+  const toolName = handler.name ?? `skill.${skillName}.handler`;
+
+  return {
+    name: toolName,
+    description: handler.description ?? `Handler tool for skill ${skillName}`,
+    inputSchema: handler.inputSchema ?? { type: 'object', additionalProperties: true },
+    outputSchema: handler.outputSchema,
+    execute: handler.execute,
+  };
 }
