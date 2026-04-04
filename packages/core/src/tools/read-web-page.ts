@@ -54,7 +54,9 @@ export function createReadWebPageTool(config?: ReadWebPageToolConfig): ToolDefin
         url: { type: 'string', description: 'The URL of the web page to read.' },
       },
     },
-    async execute(input, context) {
+    async execute(rawInput, context) {
+      // Some models send tool input as a JSON string instead of an object — normalise.
+      const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
       const { url } = input as unknown as ReadWebPageInput;
 
       try {

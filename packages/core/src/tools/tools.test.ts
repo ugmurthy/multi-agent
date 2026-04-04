@@ -189,12 +189,21 @@ describe('createWriteFileTool', () => {
     ).rejects.toThrow('outside the allowed root');
   });
 
+  it('reports malformed JSON input clearly', async () => {
+    const tool = createWriteFileTool({ allowedRoot: tempDir });
+
+    await expect(tool.execute('{"path":"bad.txt","content":"unterminated' as any, stubToolContext())).rejects.toThrow(
+      'write_file expects a JSON object',
+    );
+  });
+
   it('has requiresApproval set', () => {
     const tool = createWriteFileTool();
     expect(tool.name).toBe('write_file');
     expect(tool.requiresApproval).toBe(true);
   });
 });
+
 
 // ── shell_exec ──────────────────────────────────────────────────────────────
 

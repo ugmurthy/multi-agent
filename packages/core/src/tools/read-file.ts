@@ -38,7 +38,9 @@ export function createReadFileTool(config?: ReadFileToolConfig): ToolDefinition 
         path: { type: 'string', description: 'Absolute or relative file path to read.' },
       },
     },
-    async execute(input) {
+    async execute(rawInput) {
+      // Some models send tool input as a JSON string instead of an object — normalise.
+      const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
       const { path: filePath } = input as unknown as ReadFileInput;
       const resolved = resolve(allowedRoot, filePath);
 

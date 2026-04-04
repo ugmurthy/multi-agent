@@ -1,155 +1,321 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { Sandbox } from '@e2b/code-interpreter';
+
 import type { JsonValue } from '../../../packages/core/src/types.js';
 
-interface ExecuteCodeInput {
+// ── Input / Output contracts ────────────────────────────────────────────────
+
+interface CodeExecInput {
   code: string;
-  language?: 'python' | 'javascript' | 'js' | 'typescript' | 'ts';
-  timeoutMs?: number;
-  downloadPaths?: string[];
+  language: 'bash' | 'javascript' | 'js' | 'typescript' | 'ts' | 'python';
+  saveArtifacts?: SavedArtifactRequest[];
 }
 
-interface ExecuteCodeOutput {
-  stdout: string[];
-  stderr: string[];
-  results: JsonValue[];
-  error?: string;
-  executionCount: number;
-  downloadedFiles?: Record<string, string>;
+interface SavedArtifactRequest {
+  sandboxPath: string;
+  path: string;
 }
 
-let sandbox: Sandbox | null = null;
-
-async function getSandbox(): Promise<Sandbox> {
-  if (!sandbox) {
-    sandbox = await Sandbox.create({
-      metadata: { name: 'adaptive-agent-code-executor' },
-    });
-  }
-  return sandbox;
+interface ResultEntry {
+  text?: string;
+  json?: string;
+  html?: string;
+  svg?: string;
+  latex?: string;
+  markdown?: string;
+  javascript?: string;
+  formats: string[];
+  isMainResult: boolean;
+  omittedFormats?: string[];
 }
 
-export const name = 'execute_code';
+interface SavedArtifact {
+  sandboxPath: string;
+  path: string;
+  sizeBytes: number;
+}
+
+interface CodeExecOutput {
+  success: boolean;
+  language: string;
+  text?: string;
+  results: ResultEntry[];
+  savedArtifacts?: SavedArtifact[];
+  logs: { stdout: string[]; stderr: string[] };
+  error?: { name: string; value: string; traceback: string };
+}
+
+// ── Exported tool metadata ──────────────────────────────────────────────────
+
+export const name = 'e2b_run_code';
 
 export const description =
-  'Execute Python, JavaScript, or TypeScript code in a secure E2B sandbox with internet access.';
+  'Execute code in a secure E2B cloud sandbox. Supports bash, javascript, typescript, and python. Returns structured results with stdout, stderr, errors, and rich outputs.';
 
 export const inputSchema = {
   type: 'object',
-  required: ['code'],
+  required: ['code', 'language'],
   additionalProperties: false,
   properties: {
-    code: {
-      type: 'string',
-      description: 'The code to execute. Can include imports and multiple statements.',
-    },
+    code: { type: 'string', description: 'The source code to execute.' },
     language: {
       type: 'string',
-      description: 'Programming language: python, javascript/js, or typescript/ts. Defaults to python.',
-      enum: ['python', 'javascript', 'js', 'typescript', 'ts'],
+      enum: ['bash', 'javascript', 'js', 'typescript', 'ts', 'python'],
+      description: 'The language of the code.',
     },
-    timeoutMs: {
-      type: 'number',
-      description: 'Timeout for code execution in milliseconds. Defaults to 60000 (60 seconds).',
-    },
-    downloadPaths: {
+    saveArtifacts: {
       type: 'array',
-      items: { type: 'string' },
-      description: 'Array of absolute paths in the sandbox to download after execution (e.g., ["/home/user/output.png"]). Returns file contents as base64 strings.',
+      description:
+        'Optional list of sandbox files to download into the local artifacts directory after execution succeeds.',
+      items: {
+        type: 'object',
+        required: ['sandboxPath', 'path'],
+        additionalProperties: false,
+        properties: {
+          sandboxPath: {
+            type: 'string',
+            description: 'Path of the file inside the E2B sandbox, for example /tmp/graph.png.',
+          },
+          path: {
+            type: 'string',
+            description: 'Relative path under the local artifacts directory where the file should be saved.',
+          },
+        },
+      },
     },
   },
 };
 
 export const outputSchema = {
   type: 'object',
+  required: ['success', 'language', 'results', 'logs'],
   properties: {
-    stdout: { type: 'array', items: { type: 'string' } },
-    stderr: { type: 'array', items: { type: 'string' } },
-    results: { type: 'array' },
-    error: { type: 'string' },
-    executionCount: { type: 'number' },
-    downloadedFiles: {
+    success: { type: 'boolean', description: 'True when no execution error occurred.' },
+    language: { type: 'string', description: 'The language that was executed.' },
+    text: { type: 'string', description: 'Convenience text of the main result, if any.' },
+    results: {
+      type: 'array',
+      description: 'Rich result objects from the execution (last expression, display calls).',
+      items: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          json: { type: 'string' },
+          html: { type: 'string' },
+          svg: { type: 'string' },
+          latex: { type: 'string' },
+          markdown: { type: 'string' },
+          javascript: { type: 'string' },
+          formats: { type: 'array', items: { type: 'string' } },
+          isMainResult: { type: 'boolean' },
+          omittedFormats: {
+            type: 'array',
+            description: 'Binary formats omitted from the JSON response to avoid returning large inline payloads.',
+            items: { type: 'string' },
+          },
+        },
+      },
+    },
+    savedArtifacts: {
+      type: 'array',
+      description: 'Files copied from the sandbox into the local artifacts directory.',
+      items: {
+        type: 'object',
+        required: ['sandboxPath', 'path', 'sizeBytes'],
+        properties: {
+          sandboxPath: { type: 'string' },
+          path: { type: 'string' },
+          sizeBytes: { type: 'number' },
+        },
+      },
+    },
+    logs: {
       type: 'object',
-      description: 'Files downloaded from sandbox, keyed by path. Values are base64-encoded content.',
+      properties: {
+        stdout: { type: 'array', items: { type: 'string' } },
+        stderr: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    error: {
+      type: 'object',
+      description: 'Present only when execution failed.',
+      properties: {
+        name: { type: 'string', description: 'Error class / type name.' },
+        value: { type: 'string', description: 'Error message.' },
+        traceback: { type: 'string', description: 'Full traceback / stack trace.' },
+      },
     },
   },
 };
 
-const BINARY_FIELDS = ['png', 'jpeg', 'pdf', 'svg', 'html'] as const;
-const MAX_TEXT_LENGTH = 2000;
+// ── Execution ───────────────────────────────────────────────────────────────
 
-function summarizeResult(r: Record<string, unknown>): JsonValue {
-  const summary: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(r)) {
-    if (BINARY_FIELDS.includes(key as (typeof BINARY_FIELDS)[number]) && typeof value === 'string' && value.length > MAX_TEXT_LENGTH) {
-      summary[key] = `[base64 data, ${value.length} chars]`;
-    } else if (key === 'text' && typeof value === 'string' && value.length > MAX_TEXT_LENGTH) {
-      summary[key] = value.slice(0, MAX_TEXT_LENGTH) + `... [truncated, ${value.length} total chars]`;
-    } else {
-      summary[key] = value;
-    }
-  }
-  return summary as unknown as JsonValue;
-}
+const SANDBOX_TIMEOUT_MS = 60_000;
+const BINARY_RESULT_FORMATS = ['png', 'jpeg', 'pdf'] as const;
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_LOCAL_ARTIFACT_ROOT = resolve(MODULE_DIR, '..', '..', '..', 'artifacts');
 
-export async function execute(input: JsonValue): Promise<JsonValue> {
-  const { code, language = 'python', timeoutMs = 60000, downloadPaths } = input as unknown as ExecuteCodeInput;
+export async function execute(rawInput: JsonValue): Promise<JsonValue> {
+  // Some models send tool input as a JSON string instead of an object — normalise.
+  const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
+  const { code, language, saveArtifacts } = input as unknown as CodeExecInput;
 
   if (typeof code !== 'string' || !code.trim()) {
-    throw new Error('code must be a non-empty string');
+    return failureResult(language ?? 'unknown', 'InputError', 'code must be a non-empty string', '');
   }
 
-  const e2bLanguage = language === 'js' ? 'javascript' : language === 'ts' ? 'typescript' : language;
+  const validLanguages = ['bash', 'javascript', 'js', 'typescript', 'ts', 'python'];
+  if (!validLanguages.includes(language)) {
+    return failureResult(
+      language ?? 'unknown',
+      'InputError',
+      `Unsupported language '${language}'. Must be one of: ${validLanguages.join(', ')}`,
+      '',
+    );
+  }
+
+  if (saveArtifacts !== undefined && !Array.isArray(saveArtifacts)) {
+    return failureResult(language, 'InputError', 'saveArtifacts must be an array when provided', '');
+  }
+
+  let sbx: Sandbox | undefined;
 
   try {
-    const sbx = await getSandbox();
+    sbx = await Sandbox.create({ timeoutMs: SANDBOX_TIMEOUT_MS });
 
-    const execution = await sbx.runCode(code, {
-      language: e2bLanguage as 'python' | 'javascript' | 'typescript',
-      timeoutMs,
-    });
+    const execution = await sbx.runCode(code, { language: language as any });
 
-    const downloadedFiles: Record<string, string> = {};
-    if (downloadPaths && downloadPaths.length > 0) {
-      for (const path of downloadPaths) {
-        try {
-          const downloadUrl = sbx.downloadUrl(path, { useSignatureExpiration: 20_000 });
-          downloadedFiles[path] = downloadUrl;
-        } catch {
-          downloadedFiles[path] = `[error generating download url]`;
-        }
-      }
-    }
+    const results: ResultEntry[] = (execution.results ?? []).map(sanitizeResultEntry);
 
-    const result: ExecuteCodeOutput = {
-      stdout: execution.logs.stdout.map((msg) => String(msg)),
-      stderr: execution.logs.stderr.map((msg) => String(msg)),
-      results: execution.results.map((r) => summarizeResult(r as Record<string, unknown>)),
-      error: execution.error ? String(execution.error) : undefined,
-      executionCount: execution.executionCount,
-      ...(Object.keys(downloadedFiles).length > 0 && { downloadedFiles }),
+    const logs = {
+      stdout: execution.logs.stdout.map(String),
+      stderr: execution.logs.stderr.map(String),
     };
 
-    return result as unknown as JsonValue;
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
+    const savedArtifacts = execution.error
+      ? []
+      : await saveSandboxArtifacts(sbx, saveArtifacts ?? []);
 
-    const isAuthError =
-      /\bunauthorized\b/i.test(errorMessage) ||
-      /\bauthentication\b/i.test(errorMessage) ||
-      /\bauthorization header\b/i.test(errorMessage) ||
-      /\bapi[_ ]?key\b/i.test(errorMessage);
+    const output: CodeExecOutput = {
+      success: !execution.error,
+      language,
+      text: execution.text ?? undefined,
+      results,
+      savedArtifacts: savedArtifacts.length > 0 ? savedArtifacts : undefined,
+      logs,
+    };
 
-    if (isAuthError) {
-      sandbox = null;
-      throw new Error(`E2B authorization failed: ${errorMessage}. Check your E2B_API_KEY.`);
+    if (execution.error) {
+      output.error = {
+        name: execution.error.name,
+        value: execution.error.value,
+        traceback: execution.error.traceback,
+      };
     }
 
-    return {
-      stdout: [],
-      stderr: [],
-      results: [],
-      error: errorMessage,
-      executionCount: 0,
-    } as unknown as JsonValue;
+    return output as unknown as JsonValue;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return failureResult(language, 'SandboxError', message, '');
+  } finally {
+    if (sbx) {
+      try {
+        await sbx.kill();
+      } catch {
+        // best-effort cleanup
+      }
+    }
   }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function sanitizeResultEntry(result: {
+  text?: string;
+  json?: string;
+  html?: string;
+  svg?: string;
+  latex?: string;
+  markdown?: string;
+  javascript?: string;
+  formats(): string[];
+  isMainResult: boolean;
+  png?: string;
+  jpeg?: string;
+  pdf?: string;
+}): ResultEntry {
+  const formats = result.formats();
+  const omittedFormats = BINARY_RESULT_FORMATS.filter((format) => {
+    return typeof result[format] === 'string' && result[format]!.length > 0;
+  });
+
+  return {
+    text: result.text ?? undefined,
+    json: result.json ?? undefined,
+    html: result.html ?? undefined,
+    svg: result.svg ?? undefined,
+    latex: result.latex ?? undefined,
+    markdown: result.markdown ?? undefined,
+    javascript: result.javascript ?? undefined,
+    formats,
+    isMainResult: result.isMainResult,
+    omittedFormats: omittedFormats.length > 0 ? [...omittedFormats] : undefined,
+  };
+}
+
+async function saveSandboxArtifacts(sandbox: Sandbox, requests: SavedArtifactRequest[]): Promise<SavedArtifact[]> {
+  const savedArtifacts: SavedArtifact[] = [];
+
+  for (const request of requests) {
+    if (typeof request?.sandboxPath !== 'string' || !request.sandboxPath.trim()) {
+      throw new Error('Each saveArtifacts entry requires a non-empty "sandboxPath" string');
+    }
+    if (typeof request?.path !== 'string' || !request.path.trim()) {
+      throw new Error('Each saveArtifacts entry requires a non-empty "path" string');
+    }
+
+    const resolvedPath = resolveLocalArtifactPath(request.path);
+    const content = await sandbox.files.read(request.sandboxPath, { format: 'bytes' });
+    await mkdir(dirname(resolvedPath), { recursive: true });
+    await writeFile(resolvedPath, content);
+
+    savedArtifacts.push({
+      sandboxPath: request.sandboxPath,
+      path: resolvedPath,
+      sizeBytes: content.byteLength,
+    });
+  }
+
+  return savedArtifacts;
+}
+
+function resolveLocalArtifactPath(filePath: string): string {
+  const root = resolve(process.env.ADAPTIVE_AGENT_ARTIFACTS_DIR ?? DEFAULT_LOCAL_ARTIFACT_ROOT);
+  const resolvedPath = resolve(root, filePath);
+  const pathFromRoot = relative(root, resolvedPath);
+
+  if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
+    throw new Error(`Artifact path ${filePath} is outside the allowed root ${root}`);
+  }
+
+  return resolvedPath;
+}
+
+function failureResult(
+  language: string,
+  errorName: string,
+  errorValue: string,
+  traceback: string,
+): JsonValue {
+  const output: CodeExecOutput = {
+    success: false,
+    language,
+    results: [],
+    logs: { stdout: [], stderr: [] },
+    error: { name: errorName, value: errorValue, traceback },
+  };
+  return output as unknown as JsonValue;
 }

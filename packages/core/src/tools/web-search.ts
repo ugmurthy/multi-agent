@@ -116,7 +116,9 @@ export function createWebSearchTool(config: WebSearchToolConfig): ToolDefinition
         },
       },
     },
-    async execute(input, context) {
+    async execute(rawInput, context) {
+      // Some models send tool input as a JSON string instead of an object — normalise.
+      const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
       const { query, maxResults: perCallMax } = input as unknown as WebSearchInput;
       const count = perCallMax ?? maxResults;
       try {

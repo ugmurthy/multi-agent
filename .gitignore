@@ -54,3 +54,5 @@ artifacts/
 
 new.*
 tmp/
+logs/
+discard/

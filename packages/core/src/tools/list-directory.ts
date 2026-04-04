@@ -32,7 +32,9 @@ export function createListDirectoryTool(config?: ListDirectoryToolConfig): ToolD
         path: { type: 'string', description: 'Absolute or relative directory path to list.' },
       },
     },
-    async execute(input) {
+    async execute(rawInput) {
+      // Some models send tool input as a JSON string instead of an object — normalise.
+      const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
       const { path: dirPath } = input as unknown as ListDirectoryInput;
       const resolved = resolve(allowedRoot, dirPath);
 

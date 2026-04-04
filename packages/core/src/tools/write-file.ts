@@ -38,7 +38,19 @@ export function createWriteFileTool(config?: WriteFileToolConfig): ToolDefinitio
       },
     },
     requiresApproval: true,
-    async execute(input) {
+    async execute(rawInput) {
+      // Some models send tool input as a JSON string instead of an object — normalise.
+      let input: unknown;
+      if (typeof rawInput === 'string') {
+        try {
+          input = JSON.parse(rawInput);
+        } catch {
+          throw new Error('write_file expects a JSON object with { "path": string, "content": string } and only supports UTF-8 text');
+        }
+      } else {
+        input = rawInput;
+      }
+
       const { path: filePath, content } = input as unknown as WriteFileInput;
 
       if (typeof filePath !== 'string' || !filePath.trim()) {

@@ -1,0 +1,37 @@
+# Notes of getting sandbox working
+
+## The issue:
+- `code-executor` : is a skill that can execute code in a E2B sandbox environment
+- if sandbox return text in stderr, stdout - all is fine
+- if it return a file, i can't get the file content especially binary files
+- Why?
+    - agent is a llm loop over tools till done
+    - tools output results are ingested into llm as is assuming it is utf-8
+    - downstream write_tool isnt desinged for dealing with not utf-8 input
+    - so it will fail
+- a related problem
+    - was the return values were indicating filenames not pathnames
+    - llm was trying to get smart and check if wrote the file using read_file tool.
+    - so even when sandbox started to work partially i.e write files - read_file used to fail as it did not have complete pathnames
+    - as a result workflow failed.
+
+## Solution:
+- ensure SKILL.md for ``code-executor`` can write to file if binary and know where to write
+- the delegator also needed system prompt change to steer it away from checking if it wrote a file unless user is specifcally asking
+
+This problem consumed over 1/2 a day.
+
+Reflection:
+- Use a good harness to generate skills, it will save a lot of time  
+    - I gave OpenCode(Big Pickle) the task of writing the skill for `code-executor`
+    - then used Ampcode (smart) to repair it - couple conversations
+    - then deleted everything related to `code-executor` and started again
+    - this time i used Ampcode and deep^3 it came up with a slightly better skill
+        - the problem of binary files remained
+        - a sub sequent conversation nailed it but suggesting minimal fix to skill.md and delegator prompt
+        - On stark difference was it was thorouhg in reading e2b docs and ensured $ saving by not relying on defaults
+        - my first verions of `code-executor` used to keep sandox up for 5 mins (default)
+        - this one killed it after the work was done!
+
+
+

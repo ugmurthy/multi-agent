@@ -1689,7 +1689,7 @@ function buildInitialMessages(run: AgentRun, outputSchema?: JsonSchema, systemIn
   }
 
   const baseSystemPrompt =
-    'You are AdaptiveAgent. Use the available tools when needed. Keep execution linear. When the task is complete, return the final answer directly.';
+    'You are AdaptiveAgent. Use the available tools when needed. Keep execution linear. When the task is complete, return the final answer directly. If a tool has already completed the requested save or write action, do not call more tools just to verify or restate success unless the user explicitly asked for verification. When reporting saved artifacts, preserve the exact path returned by the tool.';
 
   const systemContent = systemInstructions
     ? `${baseSystemPrompt}\n\n## Skill Instructions\n\n${systemInstructions}`

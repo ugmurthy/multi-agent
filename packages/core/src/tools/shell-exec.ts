@@ -43,7 +43,9 @@ export function createShellExecTool(config?: ShellExecToolConfig): ToolDefinitio
       },
     },
     requiresApproval: true,
-    async execute(input, context) {
+    async execute(rawInput, context) {
+      // Some models send tool input as a JSON string instead of an object — normalise.
+      const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
       const { command, cwd } = input as unknown as ShellExecInput;
       const workingDir = cwd ?? defaultCwd;
 
