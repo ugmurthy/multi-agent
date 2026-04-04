@@ -1,0 +1,239 @@
+{
+  "project": "adaptive-agent-monorepo",
+  "branchName": "ralph/file-log-performance-analyzer",
+  "description": "Build a standalone Bun + TypeScript log analysis workspace in this monorepo at packages/analysis for adaptive-agent file-based run logs.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Scaffold analysis workspace",
+      "description": "As a developer, I want a new monorepo workspace at packages/analysis so the log analyzer can be implemented independently as @adaptive-agent/analysis.",
+      "acceptanceCriteria": [
+        "Create packages/analysis with package name @adaptive-agent/analysis",
+        "Add package scripts for build and test using Bun",
+        "Add a TypeScript entrypoint and exported CLI stub",
+        "Running bun run --cwd packages/analysis build succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Created packages/analysis as @adaptive-agent/analysis with Bun build/test/typecheck scripts, a minimal CLI stub, and a Vitest smoke test."
+    },
+    {
+      "id": "US-002",
+      "title": "Add CLI argument parsing and help output",
+      "description": "As an engineer, I want a usable CLI shell with documented commands so I can invoke the analyzer consistently.",
+      "acceptanceCriteria": [
+        "CLI supports at least analyze command and help output",
+        "Help output documents file, directory, and glob inputs",
+        "CLI accepts one or more input arguments without analyzing them yet",
+        "Running bun run --cwd packages/analysis src/cli.ts --help succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Implement input discovery for files directories and globs",
+      "description": "As an engineer, I want the analyzer to resolve file paths, directories, and glob patterns into a concrete file list.",
+      "acceptanceCriteria": [
+        "Implement input discovery for files, directories, and glob patterns",
+        "Unreadable paths are reported without crashing by default",
+        "Add tests covering files, directories, and glob resolution",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Implement streaming NDJSON log parser",
+      "description": "As an engineer, I want a streaming parser for newline-delimited JSON logs so large files can be processed safely.",
+      "acceptanceCriteria": [
+        "Parse NDJSON logs using streaming IO rather than full-file reads",
+        "Malformed JSON lines are counted and surfaced as diagnostics",
+        "Parser returns raw event objects with source file and line metadata",
+        "Add parser tests for valid and invalid lines",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Normalize raw log events",
+      "description": "As an engineer, I want parsed events normalized into typed records so downstream analysis is deterministic and forward-compatible.",
+      "acceptanceCriteria": [
+        "Normalize known event fields including time, event, run IDs, tool name, and duration",
+        "Unknown event types are preserved as generic normalized events",
+        "Add normalization tests for known and unknown event types",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Reconstruct run graph and timelines",
+      "description": "As an engineer, I want normalized events grouped into runs and ordered timelines so execution flow can be inspected end to end.",
+      "acceptanceCriteria": [
+        "Group events by runId and link root and parent run relationships",
+        "Produce ordered timelines for each run",
+        "Expose run summaries with start time, end time, and event counts",
+        "Add tests for run graph reconstruction",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add terminal overview report",
+      "description": "As an engineer, I want a default terminal summary so I can inspect log sets quickly from the command line.",
+      "acceptanceCriteria": [
+        "Analyze command prints run counts, success counts, and duration summary to the terminal",
+        "Terminal output includes top tools by usage when available",
+        "Add tests for overview report formatting using representative fixtures",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Add JSON report output",
+      "description": "As an engineer, I want a stable JSON report so scripts and CI can consume analyzer results programmatically.",
+      "acceptanceCriteria": [
+        "Implement JSON output with stable top-level keys for summary, runs, tools, and diagnostics",
+        "CLI can write JSON output to stdout or a file path",
+        "Add tests for JSON report structure",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Compute tool usage and latency statistics",
+      "description": "As an engineer, I want tool counts and latency metrics so I can identify overused and slow tools.",
+      "acceptanceCriteria": [
+        "Compute invocation counts by toolName",
+        "Compute success rate and latency stats for tools when durationMs is present",
+        "Differentiate direct tools from delegate.* synthetic tools",
+        "Add tests for tool aggregation",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Compute failure clusters and retry signals",
+      "description": "As an engineer, I want failure grouping and retry heuristics so I can prioritize stability issues.",
+      "acceptanceCriteria": [
+        "Detect failed tool and run completions from structured output fields",
+        "Group failures by tool name, error name, and error value snippet",
+        "Flag likely retry loops from repeated step or tool executions",
+        "Add tests for failure clustering and retry detection",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Compute bottlenecks and waiting time",
+      "description": "As an engineer, I want bottleneck metrics and inter-event gaps so I can see where run time is spent.",
+      "acceptanceCriteria": [
+        "Compute slowest runs, slowest steps, and longest inter-event gaps",
+        "Estimate waiting time related to child-run delegation and status transitions when possible",
+        "Add tests for bottleneck calculations using fixtures",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Add single-run drill-down mode",
+      "description": "As an engineer, I want to inspect one run deeply so I can debug a problematic execution.",
+      "acceptanceCriteria": [
+        "CLI supports selecting a run by runId or rootRunId",
+        "Single-run output includes timeline, failures, and child-run relationships",
+        "Add tests for run selection and drill-down rendering",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Add Markdown HTML and CSV exporters",
+      "description": "As an engineer or analyst, I want shareable and spreadsheet-friendly report formats so results can be reused outside the terminal.",
+      "acceptanceCriteria": [
+        "Implement Markdown and HTML report emitters",
+        "Implement CSV exports for runs, tools, failures, and cohorts",
+        "CLI supports selecting multiple output formats in one invocation",
+        "Add tests for exporter outputs",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Add cohort comparison and anomaly detection",
+      "description": "As an engineer, I want baseline comparison and anomaly signals so I can detect regressions across providers and models.",
+      "acceptanceCriteria": [
+        "Aggregate cohorts by provider, model, delegate, and time window",
+        "Support baseline comparison for duration, success rate, token usage, and tool counts",
+        "Produce rule-based anomaly findings with human-readable explanations",
+        "Add tests for cohort comparisons and anomaly rules",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Add config profiles and watch mode",
+      "description": "As an engineer, I want reusable config profiles and live watch mode so repeated and live analyses are easy to run.",
+      "acceptanceCriteria": [
+        "Support config file defaults for inputs, thresholds, and outputs",
+        "Support named profiles such as overview, failures, bottlenecks, and compare",
+        "Implement watch mode for appended lines or new matching files",
+        "Add tests for config resolution and watch-mode behavior where practical",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

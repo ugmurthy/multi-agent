@@ -1,0 +1,14 @@
+## Codebase Patterns
+- Keep new workspace TypeScript configs self-contained; this repo does not currently install `bun-types`, so package-level typecheck should not assume those globals exist.
+
+## 2026-04-04 19:23:30 +0530 - US-001
+Thread: https://ampcode.com/threads/T-019d582c-894a-7338-9b55-494b9c388f89
+- Implemented the first `@adaptive-agent/analysis` workspace scaffold under `packages/analysis`.
+- Added Bun scripts for `build`, `test`, and `typecheck`, plus a minimal `analyze` CLI stub and library export surface.
+- Added a small Vitest smoke test and local TS global declarations so the package can typecheck without a repo-wide `bun-types` install.
+- Files changed: `prd.json`, `progress.txt`, `packages/analysis/package.json`, `packages/analysis/tsconfig.json`, `packages/analysis/src/cli.ts`, `packages/analysis/src/index.ts`, `packages/analysis/src/cli.test.ts`, `packages/analysis/src/globals.d.ts`
+- **Learnings for future iterations:**
+  - New workspaces can be added under `packages/*` without changing the root workspace list.
+  - `bun test` works in package-local workspaces even when package typecheck excludes `*.test.ts` files.
+  - The first iteration should avoid depending on Bun-specific ambient types unless the dependency is explicitly installed.
+---
