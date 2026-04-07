@@ -17,12 +17,14 @@ describe('analysis cli', () => {
     expect(formatHelp()).toContain('analysis analyze [options] <file|directory|glob>')
     expect(formatHelp()).toContain('--profile <name>')
     expect(formatHelp()).toContain('--watch')
+    expect(formatHelp()).toContain('--last')
     expect(formatHelp()).toContain('csv:cohorts')
   })
 
   it('renders analyze help text', () => {
     expect(formatAnalyzeHelp()).toContain('Analyze one or more adaptive-agent log inputs.')
     expect(formatAnalyzeHelp()).toContain('--window <hour|day>')
+    expect(formatAnalyzeHelp()).toContain('--last')
   })
 
   it('analyzes discovered files and prints the terminal overview report', async () => {
@@ -38,7 +40,7 @@ describe('analysis cli', () => {
         'not json',
         '{"time":1100,"event":"tool.started","runId":"run-1","rootRunId":"run-1","stepId":"step-1","toolName":"write_file"}',
         '{"time":1400,"event":"tool.completed","runId":"run-1","rootRunId":"run-1","stepId":"step-1","toolName":"write_file","durationMs":300}',
-        '{"time":2000,"event":"run.completed","runId":"run-1","rootRunId":"run-1","durationMs":1000,"usage":{"promptTokens":10,"completionTokens":5,"totalTokens":15}}',
+        '{"time":2000,"event":"run.completed","runId":"run-1","rootRunId":"run-1","durationMs":1000,"goal":"Summarize the CLI regression sample.","usage":{"promptTokens":10,"completionTokens":5,"totalTokens":15,"estimatedCostUSD":0.3}}',
       ].join('\n') + '\n',
     )
 
@@ -50,7 +52,11 @@ describe('analysis cli', () => {
     expect(result.output).toContain('Events parsed: 4')
     expect(result.output).toContain('Malformed lines: 1')
     expect(result.output).toContain('Runs discovered: 1')
+    expect(result.output).toContain('Token usage: 15 total (prompt 10, completion 5), avg 15 per run')
+    expect(result.output).toContain('Estimated cost: $0.3 total, avg $0.3 per run')
+    expect(result.output).toContain('run-1 - Summarize the CLI regression sample.')
     expect(result.output).toContain('Top tools:')
+    expect(result.output).toContain('Tool statistics:')
     expect(result.output).toContain('Cohorts:')
     expect(result.output).toContain('missing.log')
   })
@@ -125,7 +131,7 @@ describe('analysis cli', () => {
     expect(result.exitCode).toBe(0)
     expect(result.output).toContain('Wrote 5 reports to')
     expect(await readFile(join(reportDir, 'analysis.md'), 'utf8')).toContain('# Analysis Report')
-    expect(await readFile(join(reportDir, 'runs.csv'), 'utf8')).toContain('runId,rootRunId')
+    expect(await readFile(join(reportDir, 'runs.csv'), 'utf8')).toContain('runId,rootRunId,goalText')
     expect(await readFile(join(reportDir, 'cohorts.csv'), 'utf8')).toContain('cohortId,provider,model')
   })
 
@@ -188,5 +194,46 @@ describe('analysis cli', () => {
     expect(result.output).toContain('Timeline:')
     expect(result.output).toContain('Failures:')
     expect(result.output).toContain('e2b_run_code x1')
+  })
+
+  it('uses --last to drill into the latest root run when exactly one log file is analyzed', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'analysis-cli-last-'))
+    const logPath = join(tempDir, 'events.log')
+
+    tempDirs.push(tempDir)
+
+    await writeFile(
+      logPath,
+      [
+        '{"time":1000,"event":"run.created","runId":"root-1","rootRunId":"root-1"}',
+        '{"time":1200,"event":"run.completed","runId":"root-1","rootRunId":"root-1","durationMs":200,"usage":{"promptTokens":3,"completionTokens":2,"totalTokens":5}}',
+        '{"time":2000,"event":"run.created","runId":"root-2","rootRunId":"root-2","provider":"openrouter","model":"qwen"}',
+        '{"time":2400,"event":"run.completed","runId":"root-2","rootRunId":"root-2","durationMs":400,"usage":{"promptTokens":11,"completionTokens":7,"totalTokens":18}}',
+      ].join('\n') + '\n',
+    )
+
+    const result = await runCli(['analyze', '--last', logPath])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.output).toContain('Selected run: root-2')
+    expect(result.output).toContain('Requested via: --last')
+    expect(result.output).toContain('Token usage: 18 total (input 11, completion 7)')
+  })
+
+  it('ignores --last when multiple files are analyzed', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'analysis-cli-last-ignore-'))
+    const firstLogPath = join(tempDir, 'first.log')
+    const secondLogPath = join(tempDir, 'second.log')
+
+    tempDirs.push(tempDir)
+
+    await writeFile(firstLogPath, '{"time":1000,"event":"run.created","runId":"run-1","rootRunId":"run-1"}\n', 'utf8')
+    await writeFile(secondLogPath, '{"time":2000,"event":"run.created","runId":"run-2","rootRunId":"run-2"}\n', 'utf8')
+
+    const result = await runCli(['analyze', '--last', firstLogPath, secondLogPath])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.output).toContain('Inputs received: 2')
+    expect(result.output).not.toContain('Selected run:')
   })
 })

@@ -1,7 +1,7 @@
 import type { InputDiscoveryDiagnostic } from './discovery.js'
 import type { NormalizedLogEvent } from './normalize.js'
 import type { ParseDiagnostic } from './parser.js'
-import type { ReconstructedRun, RunGraph } from './runs.js'
+import type { ReconstructedRun, RunGraph, RunSummary } from './runs.js'
 
 export type ToolKind = 'direct' | 'delegate'
 
@@ -13,6 +13,14 @@ export interface OverviewReportSummary {
   averageDurationMs?: number
   minimumDurationMs?: number
   maximumDurationMs?: number
+  usageRunCount: number
+  promptTokens?: number
+  completionTokens?: number
+  reasoningTokens?: number
+  totalTokens?: number
+  averageTotalTokens?: number
+  estimatedCostUsd?: number
+  averageEstimatedCostUsd?: number
   topTools: Array<{ toolName: string; invocationCount: number; toolKind: ToolKind }>
 }
 
@@ -43,6 +51,7 @@ export interface RunReport {
   rootRunId: string
   parentRunId?: string
   delegateName?: string
+  goalText?: string
   childRunIds: string[]
   status: 'succeeded' | 'failed' | 'replan_required' | 'running' | 'unknown'
   eventCount: number
@@ -51,6 +60,13 @@ export interface RunReport {
   endTime?: string
   endTimeMs?: number
   durationMs?: number
+  provider?: string
+  model?: string
+  promptTokens?: number
+  completionTokens?: number
+  reasoningTokens?: number
+  totalTokens?: number
+  estimatedCostUsd?: number
 }
 
 export interface FailureClusterReport {
@@ -78,6 +94,7 @@ export interface RetrySignalReport {
   signalType: 'tool' | 'step'
   runId: string
   rootRunId: string
+  goalText?: string
   toolName: string
   stepId?: string
   attemptCount: number
@@ -97,6 +114,7 @@ export interface FailureReport {
 export interface StepBottleneckReport {
   runId: string
   rootRunId: string
+  goalText?: string
   stepId: string
   toolNames: string[]
   eventCount: number
@@ -108,6 +126,7 @@ export interface StepBottleneckReport {
 export interface InterEventGapReport {
   runId: string
   rootRunId: string
+  goalText?: string
   fromEvent: string
   toEvent: string
   fromTime?: string
@@ -123,6 +142,7 @@ export interface WaitingSegmentReport {
   waitKind: 'delegation' | 'status'
   runId: string
   rootRunId: string
+  goalText?: string
   subject: string
   durationMs: number
   startTime?: string
@@ -170,6 +190,7 @@ export interface AnalysisReport {
 export interface RunSelection {
   mode: 'runId' | 'rootRunId'
   value: string
+  requestedVia?: string
 }
 
 export interface RunDrillDownTimelineEvent {
@@ -185,12 +206,16 @@ export interface RunDrillDownTimelineEvent {
   outcome?: 'success' | 'failure'
   errorName?: string
   errorValue?: string
+  sourceFile: string
+  line: number
+  raw: Record<string, unknown>
 }
 
 export interface RunDrillDownReport {
   selection: {
     mode: 'runId' | 'rootRunId'
     requestedId: string
+    requestedVia: string
     resolvedRunId: string
   }
   run: RunReport
@@ -258,6 +283,7 @@ export function summarizeOverview(runGraph: RunGraph): OverviewReportSummary {
     .filter((durationMs): durationMs is number => durationMs !== undefined)
     .sort((left, right) => left - right)
   const tools = summarizeTools(runGraph)
+  const usageSummary = summarizeUsage(runSummaries)
 
   return {
     runCount: runSummaries.length,
@@ -268,6 +294,7 @@ export function summarizeOverview(runGraph: RunGraph): OverviewReportSummary {
       durations.length > 0 ? Math.round(durations.reduce((sum, durationMs) => sum + durationMs, 0) / durations.length) : undefined,
     minimumDurationMs: durations[0],
     maximumDurationMs: durations.at(-1),
+    ...usageSummary,
     topTools: tools.slice(0, 5).map((tool) => ({
       toolName: tool.toolName,
       invocationCount: tool.invocationCount,
@@ -351,6 +378,7 @@ export function buildRunDrillDownReport(runGraph: RunGraph, selection: RunSelect
     selection: {
       mode: selection.mode,
       requestedId: selection.value,
+      requestedVia: selection.requestedVia ?? `${selection.mode}=${selection.value}`,
       resolvedRunId: selectedRun.runId,
     },
     run: toRunReport(selectedRun),
@@ -368,6 +396,9 @@ export function buildRunDrillDownReport(runGraph: RunGraph, selection: RunSelect
       outcome: event.outcome,
       errorName: event.errorName,
       errorValue: event.errorValue,
+      sourceFile: event.sourceFile,
+      line: event.line,
+      raw: event.raw,
     })),
     failures: summarizeFailureClusters(relatedRuns),
   }
@@ -393,11 +424,19 @@ export function formatOverviewReport(options: AnalysisReportOptions): string {
   }
 
   lines.push(`Duration summary: ${formatDurationSummary(summary)}`)
+  lines.push(...formatUsageSummaryLines(summary))
 
   if (summary.topTools.length > 0) {
     lines.push('', 'Top tools:')
     for (const tool of summary.topTools) {
       lines.push(`- ${tool.toolName}: ${tool.invocationCount}`)
+    }
+  }
+
+  if (report.tools.length > 0) {
+    lines.push('', 'Tool statistics:')
+    for (const tool of sortToolsForDisplay(report.tools)) {
+      lines.push(`- ${formatToolStatisticsLine(tool)}`)
     }
   }
 
@@ -426,21 +465,21 @@ export function formatOverviewReport(options: AnalysisReportOptions): string {
 
     const slowestRun = bottlenecks.slowestRuns[0]
     if (slowestRun?.durationMs !== undefined) {
-      lines.push(`- Slowest run: ${slowestRun.runId} (${formatDuration(slowestRun.durationMs)})`)
+      lines.push(`- Slowest run: ${formatRunReference(slowestRun)} (${formatDuration(slowestRun.durationMs)})`)
     }
 
     const slowestStep = bottlenecks.slowestSteps[0]
     if (slowestStep) {
       const toolLabel = slowestStep.toolNames.length > 0 ? ` [${slowestStep.toolNames.join(', ')}]` : ''
       lines.push(
-        `- Slowest step: ${slowestStep.runId}/${slowestStep.stepId}${toolLabel} (${formatDuration(slowestStep.durationMs)})`,
+        `- Slowest step: ${formatRunReference(slowestStep)}/${slowestStep.stepId}${toolLabel} (${formatDuration(slowestStep.durationMs)})`,
       )
     }
 
     const longestGap = bottlenecks.longestInterEventGaps[0]
     if (longestGap) {
       lines.push(
-        `- Longest inter-event gap: ${longestGap.runId} ${longestGap.fromEvent} -> ${longestGap.toEvent} (${formatDuration(longestGap.gapMs)})`,
+        `- Longest inter-event gap: ${formatRunReference(longestGap)} ${longestGap.fromEvent} -> ${longestGap.toEvent} (${formatDuration(longestGap.gapMs)})`,
       )
     }
 
@@ -457,6 +496,13 @@ export function formatOverviewReport(options: AnalysisReportOptions): string {
     lines.push('', `Unassigned events: ${summary.unassignedEventCount}`)
   }
 
+  if (report.runs.length > 0) {
+    lines.push('', 'Run usage:')
+    for (const run of sortRunsForDisplay(report.runs)) {
+      lines.push(`- ${formatRunUsageLine(run)}`)
+    }
+  }
+
   if (report.diagnostics.length > 0) {
     lines.push('', 'Diagnostics:')
     for (const diagnostic of report.diagnostics) {
@@ -468,16 +514,27 @@ export function formatOverviewReport(options: AnalysisReportOptions): string {
 }
 
 export function formatRunDrillDownReport(report: RunDrillDownReport): string {
+  const rootRun = report.relatedRuns.find((run) => run.runId === report.run.rootRunId) ?? report.run
   const lines = [
     'analysis analyze',
     '',
-    `Selected run: ${report.run.runId}`,
+    `Selected run: ${formatRunReference(report.run)}`,
     `Requested via: ${report.selection.mode}=${report.selection.requestedId}`,
-    `Root run: ${report.run.rootRunId}`,
+    `Root run: ${formatRunReference(rootRun)}`,
     `Status: ${report.run.status}`,
     `Duration: ${report.run.durationMs !== undefined ? formatDuration(report.run.durationMs) : 'unavailable'}`,
     `Events in focus run: ${report.run.eventCount}`,
   ]
+
+  if (report.run.provider || report.run.model) {
+    lines.push(`Model: ${[report.run.provider, report.run.model].filter(Boolean).join('/')}`)
+  }
+  if (report.run.totalTokens !== undefined) {
+    lines.push(`Token usage: ${formatNumber(report.run.totalTokens)} total`)
+  }
+  if (report.run.estimatedCostUsd !== undefined) {
+    lines.push(`Estimated cost: ${formatUsd(report.run.estimatedCostUsd)}`)
+  }
 
   if (report.run.parentRunId) {
     lines.push(`Parent run: ${report.run.parentRunId}`)
@@ -726,15 +783,26 @@ function summarizeFailureClusters(runs: ReconstructedRun[]): FailureClusterRepor
       example: cluster.example,
     }))
     .sort((left, right) => {
+      const subjectComparison = (left.toolName ?? 'run').localeCompare(right.toolName ?? 'run')
+      if (subjectComparison !== 0) {
+        return subjectComparison
+      }
+
+      const errorNameComparison = left.errorName.localeCompare(right.errorName)
+      if (errorNameComparison !== 0) {
+        return errorNameComparison
+      }
+
+      const errorValueComparison = left.errorValueSnippet.localeCompare(right.errorValueSnippet)
+      if (errorValueComparison !== 0) {
+        return errorValueComparison
+      }
+
       if (left.count !== right.count) {
         return right.count - left.count
       }
 
-      if ((left.latestTimeMs ?? -1) !== (right.latestTimeMs ?? -1)) {
-        return (right.latestTimeMs ?? -1) - (left.latestTimeMs ?? -1)
-      }
-
-      return formatFailureCluster(left).localeCompare(formatFailureCluster(right))
+      return (right.latestTimeMs ?? -1) - (left.latestTimeMs ?? -1)
     })
 }
 
@@ -784,6 +852,7 @@ function collectFailureOccurrences(runs: ReconstructedRun[]): FailureOccurrence[
 function summarizeRetrySignals(runs: ReconstructedRun[]): RetrySignalReport[] {
   const invocations = collectToolInvocations(runs)
   const signals: RetrySignalReport[] = []
+  const goalTextByRunId = new Map(runs.map((run) => [run.runId, run.summary.goalText]))
 
   const stepSignals = new Map<string, ToolInvocationRecord[]>()
   for (const invocation of invocations) {
@@ -802,7 +871,7 @@ function summarizeRetrySignals(runs: ReconstructedRun[]): RetrySignalReport[] {
       continue
     }
 
-    signals.push(toRetrySignal('step', group))
+    signals.push(toRetrySignal('step', group, goalTextByRunId))
   }
 
   const toolSignals = new Map<string, ToolInvocationRecord[]>()
@@ -820,7 +889,7 @@ function summarizeRetrySignals(runs: ReconstructedRun[]): RetrySignalReport[] {
       continue
     }
 
-    signals.push(toRetrySignal('tool', group))
+    signals.push(toRetrySignal('tool', group, goalTextByRunId))
   }
 
   return signals.sort((left, right) => {
@@ -836,7 +905,11 @@ function summarizeRetrySignals(runs: ReconstructedRun[]): RetrySignalReport[] {
   })
 }
 
-function toRetrySignal(signalType: 'tool' | 'step', group: ToolInvocationRecord[]): RetrySignalReport {
+function toRetrySignal(
+  signalType: 'tool' | 'step',
+  group: ToolInvocationRecord[],
+  goalTextByRunId: Map<string, string | undefined>,
+): RetrySignalReport {
   const sortedGroup = [...group].sort((left, right) => {
     if ((left.startTimeMs ?? -1) !== (right.startTimeMs ?? -1)) {
       return (left.startTimeMs ?? -1) - (right.startTimeMs ?? -1)
@@ -853,6 +926,7 @@ function toRetrySignal(signalType: 'tool' | 'step', group: ToolInvocationRecord[
     signalType,
     runId: sortedGroup[0].runId,
     rootRunId: sortedGroup[0].rootRunId,
+    goalText: goalTextByRunId.get(sortedGroup[0].runId),
     toolName: sortedGroup[0].toolName,
     stepId: signalType === 'step' ? sortedGroup[0].stepId : undefined,
     attemptCount: sortedGroup.length,
@@ -906,6 +980,7 @@ function summarizeStepBottlenecks(runs: ReconstructedRun[]): StepBottleneckRepor
       bottlenecks.push({
         runId: run.runId,
         rootRunId: run.rootRunId,
+        goalText: run.summary.goalText,
         stepId,
         toolNames: [...new Set(stepEvents.map((event) => event.toolName).filter((toolName): toolName is string => Boolean(toolName)))],
         eventCount: stepEvents.length,
@@ -946,6 +1021,7 @@ function summarizeInterEventGaps(runs: ReconstructedRun[]): InterEventGapReport[
       gaps.push({
         runId: run.runId,
         rootRunId: run.rootRunId,
+        goalText: run.summary.goalText,
         fromEvent: previous.event,
         toEvent: current.event,
         fromTime: previous.time,
@@ -1004,6 +1080,7 @@ function summarizeWaitingSegments(runs: ReconstructedRun[]): {
             waitKind: 'delegation',
             runId: run.runId,
             rootRunId: run.rootRunId,
+            goalText: run.summary.goalText,
             subject: pendingDelegation.subject,
             durationMs,
             startTime: pendingDelegation.startTime,
@@ -1022,6 +1099,7 @@ function summarizeWaitingSegments(runs: ReconstructedRun[]): {
             waitKind: 'status',
             runId: run.runId,
             rootRunId: run.rootRunId,
+            goalText: run.summary.goalText,
             subject: activeStatusWait.subject,
             durationMs,
             startTime: activeStatusWait.startTime,
@@ -1150,6 +1228,7 @@ function toRunReport(run: ReconstructedRun): RunReport {
     rootRunId: run.rootRunId,
     parentRunId: run.parentRunId,
     delegateName: run.delegateName,
+    goalText: run.summary.goalText,
     childRunIds: [...run.childRunIds],
     status: run.summary.status,
     eventCount: run.summary.eventCount,
@@ -1158,6 +1237,13 @@ function toRunReport(run: ReconstructedRun): RunReport {
     endTime: run.summary.endTime,
     endTimeMs: run.summary.endTimeMs,
     durationMs: run.summary.durationMs,
+    provider: run.summary.provider,
+    model: run.summary.model,
+    promptTokens: run.summary.promptTokens,
+    completionTokens: run.summary.completionTokens,
+    reasoningTokens: run.summary.reasoningTokens,
+    totalTokens: run.summary.totalTokens,
+    estimatedCostUsd: run.summary.estimatedCostUsd,
   }
 }
 
@@ -1211,8 +1297,11 @@ function appendRunTreeLine(
   if (run.durationMs !== undefined) {
     extras.push(`duration=${formatDuration(run.durationMs)}`)
   }
+  if (run.totalTokens !== undefined) {
+    extras.push(`tokens=${formatNumber(run.totalTokens)}`)
+  }
 
-  lines.push(`${prefix}${run.runId} (${extras.join(', ')})`)
+  lines.push(`${prefix}${formatRunReference(run)} (${extras.join(', ')})`)
 
   for (const child of [...(childrenByParent.get(run.runId) ?? [])].sort((left, right) => left.runId.localeCompare(right.runId))) {
     appendRunTreeLine(lines, childrenByParent, child, depth + 1)
@@ -1265,8 +1354,8 @@ function formatFailureCluster(cluster: FailureClusterReport): string {
 function formatRetrySignal(signal: RetrySignalReport): string {
   const base =
     signal.signalType === 'step' && signal.stepId
-      ? `${signal.runId} ${signal.toolName} retried ${signal.attemptCount} times in ${signal.stepId}`
-      : `${signal.runId} ${signal.toolName} retried ${signal.attemptCount} times`
+      ? `${formatRunReference(signal)} ${signal.toolName} retried ${signal.attemptCount} times in ${signal.stepId}`
+      : `${formatRunReference(signal)} ${signal.toolName} retried ${signal.attemptCount} times`
 
   const details = [`${signal.failureCount} failures`, `outcome=${signal.outcome}`]
   if (signal.latestErrorValueSnippet) {
@@ -1338,6 +1427,129 @@ function defaultFailureValue(event: NormalizedLogEvent): string {
   return event.outcome === 'failure' ? 'Structured completion reported failure.' : 'Failure recorded without a structured error payload.'
 }
 
+function summarizeUsage(runSummaries: RunSummary[]): Pick<
+  OverviewReportSummary,
+  | 'usageRunCount'
+  | 'promptTokens'
+  | 'completionTokens'
+  | 'reasoningTokens'
+  | 'totalTokens'
+  | 'averageTotalTokens'
+  | 'estimatedCostUsd'
+  | 'averageEstimatedCostUsd'
+> {
+  const usageRuns = runSummaries.filter((run) => {
+    return (
+      run.promptTokens !== undefined ||
+      run.completionTokens !== undefined ||
+      run.reasoningTokens !== undefined ||
+      run.totalTokens !== undefined ||
+      run.estimatedCostUsd !== undefined
+    )
+  })
+  const totalTokenRuns = runSummaries.filter((run): run is RunSummary & { totalTokens: number } => run.totalTokens !== undefined)
+  const costRuns = runSummaries.filter((run): run is RunSummary & { estimatedCostUsd: number } => run.estimatedCostUsd !== undefined)
+
+  return {
+    usageRunCount: usageRuns.length,
+    promptTokens: sumDefined(runSummaries.map((run) => run.promptTokens)),
+    completionTokens: sumDefined(runSummaries.map((run) => run.completionTokens)),
+    reasoningTokens: sumDefined(runSummaries.map((run) => run.reasoningTokens)),
+    totalTokens: sumDefined(runSummaries.map((run) => run.totalTokens)),
+    averageTotalTokens:
+      totalTokenRuns.length > 0 ? Math.round(totalTokenRuns.reduce((sum, run) => sum + run.totalTokens, 0) / totalTokenRuns.length) : undefined,
+    estimatedCostUsd: sumDefined(runSummaries.map((run) => run.estimatedCostUsd)),
+    averageEstimatedCostUsd:
+      costRuns.length > 0 ? costRuns.reduce((sum, run) => sum + run.estimatedCostUsd, 0) / costRuns.length : undefined,
+  }
+}
+
+function sumDefined(values: Array<number | undefined>): number | undefined {
+  const numericValues = values.filter((value): value is number => value !== undefined)
+  if (numericValues.length === 0) {
+    return undefined
+  }
+
+  return numericValues.reduce((sum, value) => sum + value, 0)
+}
+
+function formatUsageSummaryLines(summary: AnalysisReportSummary): string[] {
+  if (summary.usageRunCount === 0) {
+    return []
+  }
+
+  const tokenDetails = [
+    summary.promptTokens !== undefined ? `prompt ${formatNumber(summary.promptTokens)}` : undefined,
+    summary.completionTokens !== undefined ? `completion ${formatNumber(summary.completionTokens)}` : undefined,
+    summary.reasoningTokens !== undefined ? `reasoning ${formatNumber(summary.reasoningTokens)}` : undefined,
+  ].filter((value): value is string => value !== undefined)
+
+  const lines: string[] = []
+  if (summary.totalTokens !== undefined) {
+    const details = tokenDetails.length > 0 ? ` (${tokenDetails.join(', ')})` : ''
+    const average = summary.averageTotalTokens !== undefined ? `, avg ${formatNumber(summary.averageTotalTokens)} per run` : ''
+    lines.push(`Token usage: ${formatNumber(summary.totalTokens)} total${details}${average}`)
+  }
+  if (summary.estimatedCostUsd !== undefined) {
+    const average = summary.averageEstimatedCostUsd !== undefined ? `, avg ${formatUsd(summary.averageEstimatedCostUsd)} per run` : ''
+    lines.push(`Estimated cost: ${formatUsd(summary.estimatedCostUsd)} total${average}`)
+  }
+
+  return lines
+}
+
+function sortRunsForDisplay(runs: RunReport[]): RunReport[] {
+  return [...runs].sort((left, right) => {
+    const statusComparison = left.status.localeCompare(right.status)
+    if (statusComparison !== 0) {
+      return statusComparison
+    }
+
+    const durationComparison = compareNumbersDescending(left.durationMs, right.durationMs, left.runId.localeCompare(right.runId))
+    if (durationComparison !== 0) {
+      return durationComparison
+    }
+
+    return left.runId.localeCompare(right.runId)
+  })
+}
+
+function sortToolsForDisplay(tools: ToolReport[]): ToolReport[] {
+  return [...tools].sort((left, right) => left.toolName.localeCompare(right.toolName))
+}
+
+function formatRunUsageLine(run: RunReport): string {
+  const details = [
+    `status=${run.status}`,
+    run.totalTokens !== undefined ? `tokens=${formatNumber(run.totalTokens)}` : undefined,
+    run.estimatedCostUsd !== undefined ? `cost=${formatUsd(run.estimatedCostUsd)}` : undefined,
+    run.durationMs !== undefined ? `duration=${formatDuration(run.durationMs)}` : undefined,
+  ].filter((value): value is string => value !== undefined)
+
+  return `${formatRunReference(run)} (${details.join(', ')})`
+}
+
+function formatToolStatisticsLine(tool: ToolReport): string {
+  const details = [
+    `kind=${tool.toolKind}`,
+    `count=${formatNumber(tool.invocationCount)}`,
+    `success=${formatNumber(tool.successCount)}`,
+    `failure=${formatNumber(tool.failureCount)}`,
+    `unknown=${formatNumber(tool.unknownCount)}`,
+    `success-rate=${tool.successRate !== undefined ? formatPercent(tool.successRate) : 'unavailable'}`,
+    `samples=${formatNumber(tool.latencySampleCount)}`,
+    tool.averageDurationMs !== undefined ? `avg-duration=${formatDuration(tool.averageDurationMs)}` : undefined,
+    tool.minimumDurationMs !== undefined ? `min-duration=${formatDuration(tool.minimumDurationMs)}` : undefined,
+    tool.maximumDurationMs !== undefined ? `max-duration=${formatDuration(tool.maximumDurationMs)}` : undefined,
+  ].filter((value): value is string => value !== undefined)
+
+  return `${tool.toolName} (${details.join(', ')})`
+}
+
+function formatRunReference(run: { runId: string; goalText?: string }): string {
+  return run.goalText ? `${run.runId} - ${run.goalText}` : run.runId
+}
+
 function formatDurationSummary(summary: OverviewReportSummary): string {
   if (
     summary.averageDurationMs === undefined ||
@@ -1368,6 +1580,18 @@ function formatDuration(durationMs: number): string {
 
 function trimFixed(value: number): string {
   return value.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')
+}
+
+function formatNumber(value: number): string {
+  return trimFixed(value)
+}
+
+function formatPercent(value: number): string {
+  return `${trimFixed(value * 100)}%`
+}
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(4).replace(/\.00+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')}`
 }
 
 function formatDiagnostic(diagnostic: ReportDiagnostic): string {
@@ -1417,4 +1641,20 @@ function compareNumbers(left: number | undefined, right: number | undefined, fal
   }
 
   return left - right || fallback
+}
+
+function compareNumbersDescending(left: number | undefined, right: number | undefined, fallback: number): number {
+  if (left === undefined && right === undefined) {
+    return fallback
+  }
+
+  if (left === undefined) {
+    return 1
+  }
+
+  if (right === undefined) {
+    return -1
+  }
+
+  return right - left || fallback
 }

@@ -106,20 +106,20 @@ Additional setup details and environment variable notes live in `examples/README
 This repository is a monorepo prototype rather than a published package, so local examples import from the workspace source directly:
 
 ```ts
-import { AdaptiveAgent } from './packages/core/src/adaptive-agent.js';
-import { InMemoryEventStore } from './packages/core/src/in-memory-event-store.js';
-import { InMemoryRunStore } from './packages/core/src/in-memory-run-store.js';
-import { InMemorySnapshotStore } from './packages/core/src/in-memory-snapshot-store.js';
-import { createModelAdapter } from './packages/core/src/adapters/create-model-adapter.js';
-import { createListDirectoryTool } from './packages/core/src/tools/list-directory.js';
-import { createReadFileTool } from './packages/core/src/tools/read-file.js';
+import { AdaptiveAgent } from "./packages/core/src/adaptive-agent.js";
+import { InMemoryEventStore } from "./packages/core/src/in-memory-event-store.js";
+import { InMemoryRunStore } from "./packages/core/src/in-memory-run-store.js";
+import { InMemorySnapshotStore } from "./packages/core/src/in-memory-snapshot-store.js";
+import { createModelAdapter } from "./packages/core/src/adapters/create-model-adapter.js";
+import { createListDirectoryTool } from "./packages/core/src/tools/list-directory.js";
+import { createReadFileTool } from "./packages/core/src/tools/read-file.js";
 
 const projectRoot = process.cwd();
 
 const agent = new AdaptiveAgent({
   model: createModelAdapter({
-    provider: 'ollama',
-    model: process.env.OLLAMA_MODEL ?? 'qwen3.5',
+    provider: "ollama",
+    model: process.env.OLLAMA_MODEL ?? "qwen3.5",
   }),
   tools: [
     createReadFileTool({ allowedRoot: projectRoot }),
@@ -131,7 +131,7 @@ const agent = new AdaptiveAgent({
 });
 
 const result = await agent.run({
-  goal: 'List the top-level files in this repository and summarize their purpose.',
+  goal: "List the top-level files in this repository and summarize their purpose.",
 });
 
 console.log(result);
@@ -172,12 +172,14 @@ allowedTools:
 The handler module exports named fields matching the `ToolDefinition` shape:
 
 ```ts
-export const name = 'bmi_calculate';
-export const description = 'Calculate BMI from height and weight';
-export const inputSchema = { /* JSON Schema */ };
+export const name = "bmi_calculate";
+export const description = "Calculate BMI from height and weight";
+export const inputSchema = {
+  /* JSON Schema */
+};
 export async function execute(input, context) {
   // deterministic computation
-  return { bmi: 22.5, category: 'Normal weight' };
+  return { bmi: 22.5, category: "Normal weight" };
 }
 ```
 
@@ -246,3 +248,9 @@ bun test
 ```
 
 The root workspace is mostly a container for docs, examples, and the `packages/core` prototype. Most implementation work happens inside `packages/core/src`.
+
+## License
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

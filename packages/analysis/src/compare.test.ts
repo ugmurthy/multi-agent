@@ -188,4 +188,54 @@ describe('buildAnalysisBundle', () => {
       ]),
     )
   })
+
+  it('sorts returned cohorts by provider and then model after computing comparisons', () => {
+    const events = normalizeParsedEvents([
+      ...buildRunEvents({
+        runId: 'run-c',
+        provider: 'z-provider',
+        model: 'm-3',
+        startTime: Date.parse('2026-04-04T08:00:00Z'),
+        durationMs: 1000,
+        toolCount: 1,
+        success: true,
+        totalTokens: 100,
+      }),
+      ...buildRunEvents({
+        runId: 'run-a',
+        provider: 'a-provider',
+        model: 'm-2',
+        startTime: Date.parse('2026-04-04T09:00:00Z'),
+        durationMs: 1200,
+        toolCount: 1,
+        success: true,
+        totalTokens: 120,
+      }),
+      ...buildRunEvents({
+        runId: 'run-b',
+        provider: 'a-provider',
+        model: 'm-1',
+        startTime: Date.parse('2026-04-04T10:00:00Z'),
+        durationMs: 1400,
+        toolCount: 1,
+        success: true,
+        totalTokens: 140,
+      }),
+    ])
+
+    const bundle = buildAnalysisBundle({
+      inputCount: 1,
+      fileCount: 1,
+      eventCount: events.length,
+      malformedLineCount: 0,
+      diagnostics: [],
+      runGraph: reconstructRunGraph(events),
+    })
+
+    expect(bundle.cohorts.map((cohort) => `${cohort.provider}/${cohort.model}`)).toEqual([
+      'a-provider/m-1',
+      'a-provider/m-2',
+      'z-provider/m-3',
+    ])
+  })
 })

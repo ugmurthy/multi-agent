@@ -1,15 +1,24 @@
 import type { NormalizedLogEvent } from './normalize.js'
+import { extractChildGoalText, extractRunGoalText, resolveRunGoalText, resolveUsageSummary } from './run-metadata.js'
 
 export interface RunSummary {
   runId: string
   rootRunId: string
   parentRunId?: string
   delegateName?: string
+  goalText?: string
   startTime?: string
   startTimeMs?: number
   endTime?: string
   endTimeMs?: number
   durationMs?: number
+  provider?: string
+  model?: string
+  promptTokens?: number
+  completionTokens?: number
+  reasoningTokens?: number
+  totalTokens?: number
+  estimatedCostUsd?: number
   eventCount: number
   status: 'succeeded' | 'failed' | 'replan_required' | 'running' | 'unknown'
 }
@@ -34,6 +43,7 @@ interface MutableRunNode {
   rootRunId?: string
   parentRunId?: string
   delegateName?: string
+  goalText?: string
   timeline: NormalizedLogEvent[]
   childRunIds: Set<string>
 }
@@ -61,19 +71,23 @@ export function reconstructRunGraph(events: NormalizedLogEvent[]): RunGraph {
       }
     }
 
-    if (event.childRunId && event.parentRunId) {
-      const parentNode = getOrCreateRunNode(runs, event.parentRunId)
+    if (event.childRunId) {
+      const parentRunId = event.parentRunId ?? subjectRunId
+      const parentNode = getOrCreateRunNode(runs, parentRunId)
       const childNode = getOrCreateRunNode(runs, event.childRunId)
 
       parentNode.childRunIds.add(event.childRunId)
       if (!childNode.parentRunId) {
-        childNode.parentRunId = event.parentRunId
+        childNode.parentRunId = parentRunId
       }
       if (!childNode.rootRunId && event.rootRunId) {
         childNode.rootRunId = event.rootRunId
       }
       if (!childNode.delegateName && event.delegateName) {
         childNode.delegateName = event.delegateName
+      }
+      if (!childNode.goalText) {
+        childNode.goalText = extractChildGoalText(event.raw)
       }
     }
   }
@@ -113,6 +127,9 @@ function mergeRunMetadata(runNode: MutableRunNode, event: NormalizedLogEvent): v
   if (!runNode.delegateName && event.delegateName) {
     runNode.delegateName = event.delegateName
   }
+  if (!runNode.goalText) {
+    runNode.goalText = extractRunGoalText(event.raw)
+  }
 }
 
 function finalizeRunNode(runNode: MutableRunNode, runs: Map<string, MutableRunNode>): ReconstructedRun {
@@ -139,6 +156,7 @@ function buildRunSummary(
   const startEvent = timedEvents[0]
   const endEvent = timedEvents.at(-1)
   const status = deriveRunStatus(timeline)
+  const usage = resolveUsageSummary(timeline)
   const terminalDurationMs = [...timeline]
     .reverse()
     .find((event) => {
@@ -154,11 +172,19 @@ function buildRunSummary(
     rootRunId: resolveRootRunId(runNode, runs),
     parentRunId: runNode.parentRunId,
     delegateName: runNode.delegateName,
+    goalText: runNode.goalText ?? resolveRunGoalText(timeline),
     startTime: startEvent?.time,
     startTimeMs: startEvent?.timeMs,
     endTime: endEvent?.time,
     endTimeMs: endEvent?.timeMs,
     durationMs: terminalDurationMs ?? inferDurationMs(startEvent?.timeMs, endEvent?.timeMs),
+    provider: usage.provider ?? resolveLatestString(timeline, 'provider'),
+    model: usage.model ?? resolveLatestString(timeline, 'model'),
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+    reasoningTokens: usage.reasoningTokens,
+    totalTokens: usage.totalTokens,
+    estimatedCostUsd: usage.estimatedCostUsd,
     eventCount: timeline.length,
     status,
   }
@@ -241,4 +267,15 @@ function compareEvents(left: NormalizedLogEvent, right: NormalizedLogEvent): num
   }
 
   return left.event.localeCompare(right.event)
+}
+
+function resolveLatestString(timeline: NormalizedLogEvent[], key: 'provider' | 'model'): string | undefined {
+  for (const event of [...timeline].reverse()) {
+    const value = event[key]
+    if (value) {
+      return value
+    }
+  }
+
+  return undefined
 }

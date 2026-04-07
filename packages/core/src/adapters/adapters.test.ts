@@ -148,6 +148,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -160,11 +162,26 @@ function mockFetchResponse(body: unknown, status = 200) {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, resolve, reject };
+}
+
 describe('BaseOpenAIChatAdapter', () => {
+  let adapterSequence = 0;
+
   function createAdapter(overrides?: Partial<ConstructorParameters<typeof BaseOpenAIChatAdapter>[0]>) {
+    const model = overrides?.model ?? `test-model-${++adapterSequence}`;
+
     return new BaseOpenAIChatAdapter({
       provider: 'test',
-      model: 'test-model',
+      model,
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'test-key',
       ...overrides,
@@ -185,7 +202,7 @@ describe('BaseOpenAIChatAdapter', () => {
     expect(init.headers['Content-Type']).toBe('application/json');
 
     const body = JSON.parse(init.body);
-    expect(body.model).toBe('test-model');
+    expect(body.model).toBe(adapter.model);
     expect(body.messages).toHaveLength(2);
     expect(body.messages[0].role).toBe('system');
 
@@ -197,7 +214,7 @@ describe('BaseOpenAIChatAdapter', () => {
       completionTokens: 5,
       totalTokens: 15,
       provider: 'test',
-      model: 'test-model',
+      model: adapter.model,
     });
     expect(result.providerResponseId).toBe('chatcmpl-test-1');
   });
@@ -299,18 +316,182 @@ describe('BaseOpenAIChatAdapter', () => {
     expect(result.text).toBe('no usage tracked');
   });
 
-  it('throws ModelRequestError on non-OK HTTP status', async () => {
+  it('retries 429 responses with jitter before succeeding', async () => {
     const adapter = createAdapter();
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response('{"error":"rate limited"}', {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(STOP_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+    const resultPromise = adapter.generate(simpleRequest());
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await resultPromise;
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.text).toBe('Hello world');
+  });
+
+  it('honors Retry-After before retrying', async () => {
+    const adapter = createAdapter();
+    vi.useFakeTimers();
+
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response('{"error":"rate limited"}', {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': '2',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(STOP_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+    const resultPromise = adapter.generate(simpleRequest());
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    await resultPromise;
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares provider/model cooldown across adapter instances', async () => {
+    const firstAdapter = createAdapter({ model: 'shared-cooldown-model' });
+    const secondAdapter = createAdapter({ model: 'shared-cooldown-model' });
+
+    vi.useFakeTimers();
+
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response('{"error":"rate limited"}', {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': '2',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(STOP_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(STOP_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+    const firstPromise = firstAdapter.generate(simpleRequest());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const secondPromise = secondAdapter.generate(simpleRequest());
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.all([firstPromise, secondPromise]);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('serializes concurrent requests for the same provider and model in-process', async () => {
+    const firstAdapter = createAdapter({ model: 'serialized-model' });
+    const secondAdapter = createAdapter({ model: 'serialized-model' });
+    const firstResponse = deferred<Response>();
+
+    fetchSpy
+      .mockImplementationOnce(() => firstResponse.promise)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(STOP_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+    const firstPromise = firstAdapter.generate(simpleRequest());
+    await Promise.resolve();
+
+    const secondPromise = secondAdapter.generate(simpleRequest());
+    await Promise.resolve();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    firstResponse.resolve(
+      new Response(JSON.stringify(STOP_RESPONSE), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await Promise.all([firstPromise, secondPromise]);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops waiting for a retry when the request signal aborts', async () => {
+    const adapter = createAdapter();
+    const controller = new AbortController();
+    const aborted = new Error('stop waiting');
+
+    vi.useFakeTimers();
     fetchSpy.mockResolvedValueOnce(
       new Response('{"error":"rate limited"}', {
         status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': '2',
+        },
+      }),
+    );
+
+    const resultPromise = adapter.generate(simpleRequest({ signal: controller.signal }));
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort(aborted);
+
+    await expect(resultPromise).rejects.toBe(aborted);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws ModelRequestError on non-retryable HTTP status', async () => {
+    const adapter = createAdapter();
+    fetchSpy.mockResolvedValueOnce(
+      new Response('{"error":"bad request"}', {
+        status: 400,
         headers: { 'Content-Type': 'application/json' },
       }),
     );
 
     const error = await adapter.generate(simpleRequest()).catch((e) => e);
     expect(error).toBeInstanceOf(ModelRequestError);
-    expect(error.statusCode).toBe(429);
+    expect(error.statusCode).toBe(400);
   });
 
   it('strips trailing slashes from baseUrl', async () => {

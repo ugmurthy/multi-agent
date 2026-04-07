@@ -14,6 +14,10 @@ describe('reconstructRunGraph', () => {
           event: 'run.created',
           runId: 'root',
           rootRunId: 'root',
+          goal: {
+            type: 'string',
+            preview: 'Build the parent analysis report for this workflow.',
+          },
         },
       },
       {
@@ -28,6 +32,7 @@ describe('reconstructRunGraph', () => {
           delegateName: 'code-executor',
           toolName: 'delegate.code-executor',
           stepId: 'step-1',
+          goal: 'Generate the delegated Python artifact for the child run.',
         },
       },
       {
@@ -66,6 +71,14 @@ describe('reconstructRunGraph', () => {
           rootRunId: 'root',
           parentRunId: 'root',
           durationMs: 1900,
+          usage: {
+            promptTokens: 30,
+            completionTokens: 12,
+            totalTokens: 42,
+            estimatedCostUSD: 0.25,
+            provider: 'openrouter',
+            model: 'qwen',
+          },
         },
       },
       {
@@ -92,6 +105,7 @@ describe('reconstructRunGraph', () => {
       childRunIds: ['child'],
       summary: {
         eventCount: 3,
+        goalText: 'Build the parent analysis report for this workflow.',
         status: 'succeeded',
         startTimeMs: 1_000,
         endTimeMs: 7_000,
@@ -106,10 +120,15 @@ describe('reconstructRunGraph', () => {
       childRunIds: [],
       summary: {
         eventCount: 3,
+        goalText: 'Generate the delegated Python artifact for the child run.',
         status: 'succeeded',
         startTimeMs: 2_100,
         endTimeMs: 4_000,
         durationMs: 1900,
+        totalTokens: 42,
+        estimatedCostUsd: 0.25,
+        provider: 'openrouter',
+        model: 'qwen',
       },
     })
     expect(childRun?.timeline.map((event) => event.event)).toEqual(['run.created', 'tool.completed', 'run.completed'])

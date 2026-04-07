@@ -1,5 +1,6 @@
 import type { NormalizedLogEvent } from './normalize.js'
 import { buildAnalysisReport, type AnalysisReport, type AnalysisReportOptions, type RunReport } from './report.js'
+import { resolveUsageSummary } from './run-metadata.js'
 import type { ReconstructedRun } from './runs.js'
 
 export type CohortTimeWindow = 'hour' | 'day'
@@ -20,11 +21,6 @@ export interface ComparisonOptions {
 export interface ExtendedRunReport extends RunReport {
   provider: string
   model: string
-  promptTokens?: number
-  completionTokens?: number
-  reasoningTokens?: number
-  totalTokens?: number
-  estimatedCostUsd?: number
   toolInvocationCount: number
 }
 
@@ -103,16 +99,6 @@ interface CohortMetrics {
   averageToolInvocationCount?: number
 }
 
-interface UsageSummary {
-  provider?: string
-  model?: string
-  promptTokens?: number
-  completionTokens?: number
-  reasoningTokens?: number
-  totalTokens?: number
-  estimatedCostUsd?: number
-}
-
 export const DEFAULT_COMPARE_THRESHOLDS: CompareThresholds = {
   durationMultiplier: 1.5,
   successRateDrop: 0.15,
@@ -151,18 +137,12 @@ export function buildExtendedRunReports(runs: ReconstructedRun[], baseRuns: RunR
     if (!baseRun) {
       throw new Error(`Missing base run report for ${run.runId}.`)
     }
-
     const usage = resolveUsageSummary(run.timeline)
 
     return {
       ...baseRun,
-      provider: usage.provider ?? resolveLatestString(run.timeline, 'provider') ?? 'unknown',
-      model: usage.model ?? resolveLatestString(run.timeline, 'model') ?? 'unknown',
-      promptTokens: usage.promptTokens,
-      completionTokens: usage.completionTokens,
-      reasoningTokens: usage.reasoningTokens,
-      totalTokens: usage.totalTokens,
-      estimatedCostUsd: usage.estimatedCostUsd,
+      provider: baseRun.provider ?? usage.provider ?? 'unknown',
+      model: baseRun.model ?? usage.model ?? 'unknown',
       toolInvocationCount: toolCountsByRun.get(run.runId) ?? 0,
     }
   })
@@ -206,40 +186,71 @@ export function buildCohortReports(runs: ExtendedRunReport[], timeWindow: Cohort
   const overallMetrics = summarizeCohortMetrics(runs)
   const previousByDimension = new Map<string, { cohort: CohortAccumulator; metrics: CohortMetrics }>()
 
-  return orderedCohorts.map(({ cohort, metrics }) => {
-    const comparisons: CohortComparison[] = []
-    const dimensionKey = [cohort.provider, cohort.model, cohort.delegateName].join('|')
-    const previous = previousByDimension.get(dimensionKey)
+  return orderedCohorts
+    .map(({ cohort, metrics }) => {
+      const comparisons: CohortComparison[] = []
+      const dimensionKey = [cohort.provider, cohort.model, cohort.delegateName].join('|')
+      const previous = previousByDimension.get(dimensionKey)
 
-    if (overallMetrics.runCount > 0) {
-      comparisons.push(buildCohortComparison('overall', metrics, overallMetrics))
-    }
+      if (overallMetrics.runCount > 0) {
+        comparisons.push(buildCohortComparison('overall', metrics, overallMetrics))
+      }
 
-    if (previous && previous.cohort.cohortId !== cohort.cohortId) {
-      comparisons.push(buildCohortComparison('previous_window', metrics, previous.metrics))
-    }
+      if (previous && previous.cohort.cohortId !== cohort.cohortId) {
+        comparisons.push(buildCohortComparison('previous_window', metrics, previous.metrics))
+      }
 
-    previousByDimension.set(dimensionKey, { cohort, metrics })
+      previousByDimension.set(dimensionKey, { cohort, metrics })
 
-    return {
-      cohortId: cohort.cohortId,
-      provider: cohort.provider,
-      model: cohort.model,
-      delegateName: cohort.delegateName,
-      timeWindow: cohort.timeWindow,
-      timeWindowStart: cohort.timeWindowStart,
-      timeWindowEnd: cohort.timeWindowEnd,
-      runCount: metrics.runCount,
-      successCount: metrics.successCount,
-      failureCount: metrics.failureCount,
-      successRate: metrics.successRate,
-      averageDurationMs: metrics.averageDurationMs,
-      totalTokens: metrics.totalTokens,
-      averageTotalTokens: metrics.averageTotalTokens,
-      averageToolInvocationCount: metrics.averageToolInvocationCount,
-      comparisons,
-    }
-  })
+      return {
+        cohortId: cohort.cohortId,
+        provider: cohort.provider,
+        model: cohort.model,
+        delegateName: cohort.delegateName,
+        timeWindow: cohort.timeWindow,
+        timeWindowStart: cohort.timeWindowStart,
+        timeWindowEnd: cohort.timeWindowEnd,
+        runCount: metrics.runCount,
+        successCount: metrics.successCount,
+        failureCount: metrics.failureCount,
+        successRate: metrics.successRate,
+        averageDurationMs: metrics.averageDurationMs,
+        totalTokens: metrics.totalTokens,
+        averageTotalTokens: metrics.averageTotalTokens,
+        averageToolInvocationCount: metrics.averageToolInvocationCount,
+        comparisons,
+      }
+    })
+    .sort((left, right) => {
+      const providerComparison = left.provider.localeCompare(right.provider)
+      if (providerComparison !== 0) {
+        return providerComparison
+      }
+
+      const modelComparison = left.model.localeCompare(right.model)
+      if (modelComparison !== 0) {
+        return modelComparison
+      }
+
+      const delegateComparison = left.delegateName.localeCompare(right.delegateName)
+      if (delegateComparison !== 0) {
+        return delegateComparison
+      }
+
+      if (left.timeWindowStart && right.timeWindowStart && left.timeWindowStart !== right.timeWindowStart) {
+        return left.timeWindowStart.localeCompare(right.timeWindowStart)
+      }
+
+      if (!left.timeWindowStart && right.timeWindowStart) {
+        return 1
+      }
+
+      if (left.timeWindowStart && !right.timeWindowStart) {
+        return -1
+      }
+
+      return left.cohortId.localeCompare(right.cohortId)
+    })
 }
 
 export function buildAnomalyFindings(cohorts: CohortReport[], thresholds: CompareThresholds): AnomalyFinding[] {
@@ -390,97 +401,6 @@ function countToolInvocationsByRun(runs: ReconstructedRun[]): Map<string, number
   }
 
   return new Map([...keysByRun.entries()].map(([runId, keys]) => [runId, keys.size]))
-}
-
-function resolveUsageSummary(timeline: NormalizedLogEvent[]): UsageSummary {
-  const usageSummary: UsageSummary = {}
-
-  for (const event of [...timeline].reverse()) {
-    const usage = extractUsageSummary(event)
-
-    if (!usageSummary.provider) {
-      usageSummary.provider = usage.provider ?? event.provider
-    }
-    if (!usageSummary.model) {
-      usageSummary.model = usage.model ?? event.model
-    }
-    if (usageSummary.promptTokens === undefined) {
-      usageSummary.promptTokens = usage.promptTokens
-    }
-    if (usageSummary.completionTokens === undefined) {
-      usageSummary.completionTokens = usage.completionTokens
-    }
-    if (usageSummary.reasoningTokens === undefined) {
-      usageSummary.reasoningTokens = usage.reasoningTokens
-    }
-    if (usageSummary.totalTokens === undefined) {
-      usageSummary.totalTokens = usage.totalTokens
-    }
-    if (usageSummary.estimatedCostUsd === undefined) {
-      usageSummary.estimatedCostUsd = usage.estimatedCostUsd
-    }
-  }
-
-  if (usageSummary.totalTokens === undefined) {
-    const derivedTotal = [usageSummary.promptTokens, usageSummary.completionTokens, usageSummary.reasoningTokens]
-      .filter((value): value is number => value !== undefined)
-      .reduce((sum, value) => sum + value, 0)
-
-    if (derivedTotal > 0) {
-      usageSummary.totalTokens = derivedTotal
-    }
-  }
-
-  return usageSummary
-}
-
-function extractUsageSummary(event: NormalizedLogEvent): UsageSummary {
-  const usageCandidates = [
-    readRecord(event.raw.usage),
-    readRecord(readRecord(event.raw.result)?.usage),
-    readRecord(readRecord(event.raw.output)?.usage),
-  ].filter((value): value is Record<string, unknown> => value !== undefined)
-
-  for (const usage of usageCandidates) {
-    const promptTokens = readNumber(usage.promptTokens)
-    const completionTokens = readNumber(usage.completionTokens)
-    const reasoningTokens = readNumber(usage.reasoningTokens)
-    const totalTokens = readNumber(usage.totalTokens)
-    const estimatedCostUsd = readNumber(usage.estimatedCostUSD)
-
-    if (
-      promptTokens !== undefined ||
-      completionTokens !== undefined ||
-      reasoningTokens !== undefined ||
-      totalTokens !== undefined ||
-      estimatedCostUsd !== undefined ||
-      readString(usage.provider) ||
-      readString(usage.model)
-    ) {
-      return {
-        provider: readString(usage.provider),
-        model: readString(usage.model),
-        promptTokens,
-        completionTokens,
-        reasoningTokens,
-        totalTokens,
-        estimatedCostUsd,
-      }
-    }
-  }
-
-  return {}
-}
-
-function resolveLatestString(timeline: NormalizedLogEvent[], key: 'provider' | 'model'): string | undefined {
-  for (const event of [...timeline].reverse()) {
-    const value = event[key]
-    if (value) {
-      return value
-    }
-  }
-
-  return undefined
 }
 
 function summarizeCohortMetrics(runs: ExtendedRunReport[]): CohortMetrics {

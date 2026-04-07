@@ -72,6 +72,119 @@ const DEFAULT_CAPABILITIES: ModelCapabilities = {
   usage: true,
 };
 
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const DEFAULT_MAX_RETRIES = 2;
+const INITIAL_RETRY_DELAY_MS = 500;
+const MAX_RETRY_DELAY_MS = 8_000;
+// Keep the local process from stampeding the same upstream/model when future
+// parallel sub-agents begin issuing requests concurrently.
+const MAX_CONCURRENT_REQUESTS_PER_MODEL = 1;
+
+const modelRequestGates = new Map<string, ModelRequestGate>();
+
+interface GateWaiter {
+  resolve: (release: () => void) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+class ModelRequestGate {
+  private activeCount = 0;
+  private cooldownUntil = 0;
+  private readonly waiters: GateWaiter[] = [];
+  private drainTimer: ReturnType<typeof setTimeout> | undefined;
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(createAbortError(signal.reason));
+        return;
+      }
+
+      const waiter: GateWaiter = { resolve, reject, signal };
+      waiter.onAbort = () => {
+        this.removeWaiter(waiter);
+        reject(createAbortError(signal.reason));
+      };
+
+      signal?.addEventListener('abort', waiter.onAbort, { once: true });
+      this.waiters.push(waiter);
+      this.drain();
+    });
+  }
+
+  imposeCooldown(delayMs: number): void {
+    if (delayMs <= 0) {
+      return;
+    }
+
+    this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + delayMs);
+    this.scheduleDrain();
+  }
+
+  private drain(): void {
+    if (this.activeCount >= MAX_CONCURRENT_REQUESTS_PER_MODEL) {
+      return;
+    }
+
+    const remainingCooldownMs = this.cooldownUntil - Date.now();
+    if (remainingCooldownMs > 0) {
+      this.scheduleDrain(remainingCooldownMs);
+      return;
+    }
+
+    this.clearDrainTimer();
+
+    while (this.activeCount < MAX_CONCURRENT_REQUESTS_PER_MODEL) {
+      const waiter = this.waiters.shift();
+      if (!waiter) {
+        return;
+      }
+
+      waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+      if (waiter.signal?.aborted) {
+        continue;
+      }
+
+      this.activeCount += 1;
+      let released = false;
+      waiter.resolve(() => {
+        if (released) {
+          return;
+        }
+
+        released = true;
+        this.activeCount = Math.max(0, this.activeCount - 1);
+        this.drain();
+      });
+    }
+  }
+
+  private removeWaiter(waiter: GateWaiter): void {
+    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+    const index = this.waiters.indexOf(waiter);
+    if (index >= 0) {
+      this.waiters.splice(index, 1);
+    }
+  }
+
+  private scheduleDrain(delayMs = Math.max(0, this.cooldownUntil - Date.now())): void {
+    this.clearDrainTimer();
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = undefined;
+      this.drain();
+    }, Math.max(0, delayMs));
+  }
+
+  private clearDrainTimer(): void {
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = undefined;
+    }
+  }
+}
+
 export class BaseOpenAIChatAdapter implements ModelAdapter {
   readonly provider: string;
   readonly model: string;
@@ -80,6 +193,7 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly defaultHeaders: Record<string, string>;
+  private readonly requestGate: ModelRequestGate;
 
   constructor(config: BaseOpenAIChatAdapterConfig) {
     this.provider = config.provider;
@@ -88,6 +202,7 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
     this.apiKey = config.apiKey;
     this.defaultHeaders = config.defaultHeaders ?? {};
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...config.capabilities };
+    this.requestGate = getOrCreateModelRequestGate(this.provider, this.model);
   }
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
@@ -95,23 +210,38 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
     const headers = this.buildHeaders();
     const url = `${this.baseUrl}/chat/completions`;
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    let attempt = 0;
+    while (true) {
+      let retryDelayMs: number | undefined;
+      const release = await this.requestGate.acquire(request.signal);
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: request.signal,
+        });
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'unknown error');
-      throw new ModelRequestError(
-        `${this.provider} API returned ${response.status}: ${errorText}`,
-        response.status,
-      );
+        if (!response.ok) {
+          throw await toModelRequestError(this.provider, response);
+        }
+
+        const data = (await response.json()) as OpenAIChatCompletionResponse;
+        return this.parseResponse(data);
+      } catch (error) {
+        retryDelayMs = getRetryDelayMs(error, attempt);
+        if (retryDelayMs === undefined || isAbortError(error) || request.signal?.aborted) {
+          throw error;
+        }
+
+        this.requestGate.imposeCooldown(retryDelayMs);
+      } finally {
+        release();
+      }
+
+      await sleepWithSignal(retryDelayMs, request.signal);
+      attempt += 1;
     }
-
-    const data = (await response.json()) as OpenAIChatCompletionResponse;
-    return this.parseResponse(data);
   }
 
   protected buildRequestBody(
@@ -200,10 +330,109 @@ export class ModelRequestError extends Error {
   constructor(
     message: string,
     readonly statusCode: number,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'ModelRequestError';
   }
+}
+
+async function toModelRequestError(provider: string, response: Response): Promise<ModelRequestError> {
+  const errorText = await response.text().catch(() => 'unknown error');
+  return new ModelRequestError(
+    `${provider} API returned ${response.status}: ${errorText}`,
+    response.status,
+    parseRetryAfterMs(response.headers.get('Retry-After')),
+  );
+}
+
+function getRetryDelayMs(error: unknown, attempt: number): number | undefined {
+  if (!(error instanceof ModelRequestError)) {
+    return undefined;
+  }
+
+  if (!RETRYABLE_STATUS_CODES.has(error.statusCode) || attempt >= DEFAULT_MAX_RETRIES) {
+    return undefined;
+  }
+
+  if (error.retryAfterMs !== undefined) {
+    return Math.max(0, error.retryAfterMs);
+  }
+
+  const cappedDelayMs = Math.min(MAX_RETRY_DELAY_MS, INITIAL_RETRY_DELAY_MS * 2 ** attempt);
+  return Math.random() * cappedDelayMs;
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1000);
+  }
+
+  const retryAt = Date.parse(value);
+  if (Number.isNaN(retryAt)) {
+    return undefined;
+  }
+
+  return Math.max(0, retryAt - Date.now());
+}
+
+function sleepWithSignal(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) {
+    if (signal?.aborted) {
+      throw createAbortError(signal.reason);
+    }
+
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError(signal.reason));
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, delayMs);
+
+    const onAbort = () => {
+      clearTimeout(timeoutId);
+      cleanup();
+      reject(createAbortError(signal?.reason));
+    };
+
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function createAbortError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    return reason;
+  }
+
+  return new DOMException(typeof reason === 'string' ? reason : 'The operation was aborted.', 'AbortError');
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function getOrCreateModelRequestGate(provider: string, model: string): ModelRequestGate {
+  const key = `${provider}\u0000${model}`;
+  let gate = modelRequestGates.get(key);
+  if (!gate) {
+    gate = new ModelRequestGate();
+    modelRequestGates.set(key, gate);
+  }
+
+  return gate;
 }
 
 function toOpenAIMessage(msg: ModelMessage): OpenAIMessage {

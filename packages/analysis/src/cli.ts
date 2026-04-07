@@ -41,6 +41,7 @@ type ParsedAnalyzeArgs =
       inputs: string[]
       runId?: string
       rootRunId?: string
+      last: boolean
     }
 
 export function formatHelp(): string {
@@ -66,6 +67,7 @@ export function formatHelp(): string {
     '  --window <hour|day>           Cohort comparison time window (default: day)',
     '  --run <runId>                 Drill into one run by runId',
     '  --root-run <rootRunId>        Drill into a root run tree by rootRunId',
+    '  --last                        Drill into the latest rootRunId when exactly one log file is analyzed',
     '',
     'Inputs:',
     '  file       Analyze a single newline-delimited JSON log file',
@@ -100,6 +102,7 @@ export function formatAnalyzeHelp(): string {
     '  --window <hour|day>           Cohort comparison time window',
     '  --run <runId>                 Drill into one run by runId',
     '  --root-run <rootRunId>        Drill into a root run tree by rootRunId',
+    '  --last                        Drill into the latest rootRunId for a single analyzed log file',
     '',
     'Inputs:',
     '  file       Analyze one NDJSON log file directly',
@@ -173,6 +176,7 @@ export async function runCli(args: string[], options: RunCliOptions = {}): Promi
             thresholds: settings.thresholds,
             analysis: update.analysis,
             drillDownSelection,
+            preferLastRootRun: parsedArgs.last,
           })
 
           const header =
@@ -209,6 +213,7 @@ export async function runCli(args: string[], options: RunCliOptions = {}): Promi
       thresholds: settings.thresholds,
       analysis,
       drillDownSelection,
+      preferLastRootRun: parsedArgs.last,
     })
   } catch (error) {
     return {
@@ -227,6 +232,7 @@ async function renderAnalysisResult(options: {
   thresholds: CompareThresholds
   analysis: Awaited<ReturnType<typeof analyzeLogInputs>>
   drillDownSelection?: { mode: 'runId' | 'rootRunId'; value: string }
+  preferLastRootRun?: boolean
 }): Promise<CliResult> {
   const reportOptions = {
     inputCount: options.inputCount,
@@ -236,14 +242,19 @@ async function renderAnalysisResult(options: {
     diagnostics: options.analysis.diagnostics,
     runGraph: options.analysis.runGraph,
   }
-  const drillDownReport = options.drillDownSelection
-    ? buildRunDrillDownReport(options.analysis.runGraph, options.drillDownSelection)
+  const resolvedDrillDownSelection = resolveDrillDownSelection({
+    analysis: options.analysis,
+    drillDownSelection: options.drillDownSelection,
+    preferLastRootRun: options.preferLastRootRun,
+  })
+  const drillDownReport = resolvedDrillDownSelection
+    ? buildRunDrillDownReport(options.analysis.runGraph, resolvedDrillDownSelection)
     : undefined
 
-  if (options.drillDownSelection && !drillDownReport) {
+  if (resolvedDrillDownSelection && !drillDownReport) {
     return {
       exitCode: 1,
-      output: `No run matched ${options.drillDownSelection.mode}=${options.drillDownSelection.value}.`,
+      output: `No run matched ${resolvedDrillDownSelection.mode}=${resolvedDrillDownSelection.value}.`,
     }
   }
 
@@ -316,6 +327,7 @@ function parseAnalyzeArgs(args: string[]): ParsedAnalyzeArgs {
   let timeWindow: CohortTimeWindow | undefined
   let runId: string | undefined
   let rootRunId: string | undefined
+  let last = false
   const inputs: string[] = []
 
   for (let index = 0; index < args.length; index += 1) {
@@ -437,6 +449,11 @@ function parseAnalyzeArgs(args: string[]): ParsedAnalyzeArgs {
       continue
     }
 
+    if (arg === '--last') {
+      last = true
+      continue
+    }
+
     if (arg.startsWith('-')) {
       return { kind: 'error', error: `Unknown option: ${arg}` }
     }
@@ -456,7 +473,34 @@ function parseAnalyzeArgs(args: string[]): ParsedAnalyzeArgs {
     inputs,
     runId,
     rootRunId,
+    last,
   }
+}
+
+function resolveDrillDownSelection(options: {
+  analysis: Awaited<ReturnType<typeof analyzeLogInputs>>
+  drillDownSelection?: { mode: 'runId' | 'rootRunId'; value: string }
+  preferLastRootRun?: boolean
+}): { mode: 'runId' | 'rootRunId'; value: string; requestedVia?: string } | undefined {
+  if (options.drillDownSelection) {
+    return options.drillDownSelection
+  }
+
+  if (!options.preferLastRootRun || options.analysis.discovery.files.length !== 1) {
+    return undefined
+  }
+
+  for (const event of [...options.analysis.normalizedEvents].reverse()) {
+    if (event.rootRunId) {
+      return {
+        mode: 'rootRunId',
+        value: event.rootRunId,
+        requestedVia: '--last',
+      }
+    }
+  }
+
+  return undefined
 }
 
 if (import.meta.main) {

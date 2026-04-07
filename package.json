@@ -1,7 +1,11 @@
 {
   "name": "adaptive-agent-monorepo",
+  "version": "0.0.1",
+  "license": "MIT",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "dependencies": {
     "@e2b/code-interpreter": "^2.4.0",
     "@types/marked-terminal": "^6.1.1",

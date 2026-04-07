@@ -15,6 +15,7 @@ describe('reporting', () => {
           event: 'run.created',
           runId: 'run-1',
           rootRunId: 'run-1',
+          goal: 'Draft the initial implementation plan for run one.',
         },
       },
       {
@@ -51,6 +52,12 @@ describe('reporting', () => {
           runId: 'run-1',
           rootRunId: 'run-1',
           durationMs: 1000,
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            totalTokens: 15,
+            estimatedCostUSD: 0.12,
+          },
         },
       },
       {
@@ -105,10 +112,87 @@ describe('reporting', () => {
     expect(output).toContain('Successful runs: 1')
     expect(output).toContain('Failed runs: 1')
     expect(output).toContain('Duration summary: avg 750ms, min 500ms, max 1s')
+    expect(output).toContain('Token usage: 15 total (prompt 10, completion 5), avg 15 per run')
+    expect(output).toContain('Estimated cost: $0.12 total, avg $0.12 per run')
+    expect(output).toContain('Run usage:')
+    expect(output).toContain('run-1 - Draft the initial implementation plan for run one.')
     expect(output).toContain('Top tools:')
+    expect(output).toContain('Tool statistics:')
+    expect(output).toContain('read_file (kind=direct, count=1, success=0, failure=1, unknown=0, success-rate=0%, samples=1, avg-duration=50ms, min-duration=50ms, max-duration=50ms)')
     expect(output).toContain('- read_file: 1')
     expect(output).toContain('- write_file: 1')
     expect(output).toContain('Failure clusters:')
+
+    const failedRunIndex = output.indexOf('run-2 (status=failed')
+    const succeededRunIndex = output.indexOf('run-1 - Draft the initial implementation plan for run one. (status=succeeded')
+    expect(failedRunIndex).toBeGreaterThan(-1)
+    expect(succeededRunIndex).toBeGreaterThan(-1)
+    expect(failedRunIndex).toBeLessThan(succeededRunIndex)
+  })
+
+  it('sorts failure clusters by subject and then by error', () => {
+    const events = normalizeParsedEvents([
+      {
+        sourceFile: '/tmp/events.log',
+        line: 1,
+        data: { time: 1_000, event: 'run.created', runId: 'run-1', rootRunId: 'run-1' },
+      },
+      {
+        sourceFile: '/tmp/events.log',
+        line: 2,
+        data: {
+          time: 1_100,
+          event: 'tool.failed',
+          runId: 'run-1',
+          rootRunId: 'run-1',
+          stepId: 'step-1',
+          toolName: 'alpha_tool',
+          error: 'boom',
+          code: 'Z_ERROR',
+        },
+      },
+      {
+        sourceFile: '/tmp/events.log',
+        line: 3,
+        data: {
+          time: 1_200,
+          event: 'tool.failed',
+          runId: 'run-1',
+          rootRunId: 'run-1',
+          stepId: 'step-2',
+          toolName: 'alpha_tool',
+          error: 'boom',
+          code: 'A_ERROR',
+        },
+      },
+      {
+        sourceFile: '/tmp/events.log',
+        line: 4,
+        data: {
+          time: 1_300,
+          event: 'run.failed',
+          runId: 'run-1',
+          rootRunId: 'run-1',
+          error: 'run failed',
+          code: 'RUN_ERROR',
+        },
+      },
+    ])
+
+    const report = buildAnalysisReport({
+      inputCount: 1,
+      fileCount: 1,
+      eventCount: events.length,
+      malformedLineCount: 0,
+      diagnostics: [],
+      runGraph: reconstructRunGraph(events),
+    })
+
+    expect(report.failures.clusters.map((cluster) => `${cluster.toolName ?? 'run'}:${cluster.errorName}`)).toEqual([
+      'alpha_tool:A_ERROR',
+      'alpha_tool:Z_ERROR',
+      'run:RUN_ERROR',
+    ])
   })
 
   it('builds analysis reports with failure clusters retry signals bottlenecks and structured run failures', () => {
@@ -384,6 +468,132 @@ describe('reporting', () => {
     })
   })
 
+  it('threads goal text and usage into run reports and drill-down output', () => {
+    const events = normalizeParsedEvents([
+      {
+        sourceFile: '/tmp/events.log',
+        line: 1,
+        data: {
+          time: 1_000,
+          event: 'run.created',
+          runId: 'root',
+          rootRunId: 'root',
+          goal: {
+            type: 'string',
+            preview: 'Coordinate the root workflow and delegate code generation.',
+          },
+        },
+      },
+      {
+        sourceFile: '/tmp/events.log',
+        line: 2,
+        data: {
+          time: 1_100,
+          event: 'tool.started',
+          runId: 'root',
+          rootRunId: 'root',
+          stepId: 'step-1',
+          toolName: 'delegate.code-executor',
+          childRunId: 'child',
+          input: {
+            type: 'object',
+            preview: {
+              goal: {
+                type: 'string',
+                preview: 'Generate the child implementation artifact.',
+              },
+            },
+          },
+        },
+      },
+      {
+        sourceFile: '/tmp/events.log',
+        line: 3,
+        data: {
+          time: 1_200,
+          event: 'run.completed',
+          runId: 'root',
+          rootRunId: 'root',
+          durationMs: 200,
+          usage: {
+            promptTokens: 20,
+            completionTokens: 8,
+            totalTokens: 28,
+            estimatedCostUSD: 0.4,
+            provider: 'openrouter',
+            model: 'qwen',
+          },
+        },
+      },
+      {
+        sourceFile: '/tmp/events.log',
+        line: 4,
+        data: {
+          time: 1_300,
+          event: 'run.completed',
+          runId: 'child',
+          rootRunId: 'root',
+          parentRunId: 'root',
+          durationMs: 100,
+          usage: {
+            totalTokens: 12,
+            estimatedCostUSD: 0.05,
+          },
+        },
+      },
+    ])
+
+    const runGraph = reconstructRunGraph(events)
+    const report = buildAnalysisReport({
+      inputCount: 1,
+      fileCount: 1,
+      eventCount: events.length,
+      malformedLineCount: 0,
+      diagnostics: [],
+      runGraph,
+    })
+    const drillDown = buildRunDrillDownReport(runGraph, { mode: 'rootRunId', value: 'root' })
+
+    expect(report.summary).toMatchObject({
+      usageRunCount: 2,
+      totalTokens: 40,
+      estimatedCostUsd: 0.45,
+    })
+    expect(report.runs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          runId: 'root',
+          goalText: 'Coordinate the root workflow and delegate code generation.',
+          totalTokens: 28,
+          estimatedCostUsd: 0.4,
+          provider: 'openrouter',
+          model: 'qwen',
+        }),
+        expect.objectContaining({
+          runId: 'child',
+          goalText: 'Generate the child implementation artifact.',
+          totalTokens: 12,
+          estimatedCostUsd: 0.05,
+        }),
+      ]),
+    )
+    expect(drillDown?.run).toEqual(
+      expect.objectContaining({
+        runId: 'root',
+        goalText: 'Coordinate the root workflow and delegate code generation.',
+        totalTokens: 28,
+      }),
+    )
+    expect(formatOverviewReport({
+      inputCount: 1,
+      fileCount: 1,
+      eventCount: events.length,
+      malformedLineCount: 0,
+      diagnostics: [],
+      runGraph,
+    })).toContain('child - Generate the child implementation artifact.')
+  })
+
   it('builds a single-run drill-down with the focus timeline failure clusters and child relationships', () => {
     const events = normalizeParsedEvents([
       {
@@ -458,6 +668,7 @@ describe('reporting', () => {
       selection: {
         mode: 'rootRunId',
         requestedId: 'root',
+        requestedVia: 'rootRunId=root',
         resolvedRunId: 'root',
       },
       run: {
@@ -472,6 +683,18 @@ describe('reporting', () => {
       ]),
     )
     expect(drillDown?.timeline.map((event) => event.event)).toEqual(['run.created', 'tool.started', 'tool.completed'])
+    expect(drillDown?.timeline[1]).toMatchObject({
+      sourceFile: '/tmp/events.log',
+      line: 2,
+      raw: {
+        event: 'tool.started',
+        runId: 'root',
+        rootRunId: 'root',
+        stepId: 'step-1',
+        toolName: 'delegate.code-executor',
+        childRunId: 'child',
+      },
+    })
     expect(drillDown?.failures).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ toolName: 'e2b_run_code', count: 1 }),
