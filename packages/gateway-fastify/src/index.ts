@@ -14,3 +14,4 @@ export * from './bootstrap.js';
 export * from './stores.js';
 export * from './channels.js';
 export * from './outbound.js';
+export * from './hooks.js';
