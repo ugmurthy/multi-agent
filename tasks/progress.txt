@@ -257,3 +257,26 @@ Thread: https://ampcode.com/threads/T-019d709a-84c3-748d-9fb0-778b0930f20e
   - The reconnect helper does not duplicate channels when `currentRunId === currentRootRunId`.
   - Reconnect reuses the same ownership checks as `getAuthorizedGatewaySession(...)` — different principals are always rejected.
 ---
+
+## 2026-04-09 10:42 IST - US-025
+Thread: https://ampcode.com/threads/T-019d709a-84c3-748d-9fb0-778b0930f20e
+- Added `createGatewayHealthManager(...)` with state transitions for healthy, startup_failed, and degraded, tracking stores availability, scheduler status, and agent count.
+- Added `createGatewayMetrics()` with increment/decrement/reset for 12 operational counters (sessions, runs, auth failures, routing misses, cron claims, etc.).
+- Added `createGatewayLogger(sink?)` emitting structured JSON log entries with level, event, message, timestamp, and data.
+- Defined `GATEWAY_LOG_EVENTS` covering all operational categories (auth, sessions, routing, chat, runs, hooks, cron, protocol).
+- Files changed: `packages/gateway-fastify/src/observability.ts`, `packages/gateway-fastify/src/observability.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Health state transitions are one-directional in severity: `healthy` → `degraded` → `startup_failed`; callers use `setState(...)` for explicit overrides.
+  - Metrics counters return snapshots via the `counters` getter, not mutable references.
+  - The default log sink writes JSON to `console.log`/`console.warn`/`console.error`; custom sinks can redirect to external logging systems.
+---
+
+## 2026-04-09 10:42 IST - US-026
+Thread: https://ampcode.com/threads/T-019d709a-84c3-748d-9fb0-778b0930f20e
+- Created comprehensive `README.md` documenting gateway config structure, agent config structure, all inbound and outbound WebSocket frames, routing behavior, session concurrency, scheduler target kinds and delivery modes, reconnect expectations, hooks, health/observability, and project structure.
+- Added example JSON config files in `packages/gateway-fastify/examples/` for gateway and agent configuration.
+- Files changed: `packages/gateway-fastify/README.md`, `packages/gateway-fastify/examples/gateway.json`, `packages/gateway-fastify/examples/agent.json`.
+- **Learnings for future iterations:**
+  - The README serves as the canonical integration guide; keep it in sync with protocol.ts frame types and config.ts schema when either evolves.
+  - Example configs use safe defaults (cron disabled, warn hook policy, in-memory stores implied) so developers can start locally without external dependencies.
+---
