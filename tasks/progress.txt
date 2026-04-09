@@ -221,3 +221,39 @@ Thread: https://ampcode.com/threads/T-019d707b-b23c-7138-9830-a0838054d9e2
   - `releaseLease` requires the caller to prove ownership via `lease_owner` match, preventing accidental release of another worker's lease.
   - Cron stores extend the base `CronJobStore`/`CronRunStore` interfaces with lease-aware methods, so the scheduler can use them while generic code keeps the simpler interface.
 ---
+
+## 2026-04-09 10:35 IST - US-022
+Thread: https://ampcode.com/threads/T-019d709a-84c3-748d-9fb0-778b0930f20e
+- Added a scheduler loop with `createSchedulerLoop(...)` that polls for due cron jobs, deduplicates by fire time, creates cron run records, and dispatches through `executeCronTarget(...)`.
+- Implemented support for all 3 cron target kinds: `session_event` (reuses existing session via `executeGatewayChatTurn`), `isolated_run` (calls `executeGatewayRunStart` without session state), and `isolated_chat` (creates a fresh session then chats).
+- Approval-requested cron results are mapped to `needs_review` status instead of blocking indefinitely.
+- Files changed: `packages/gateway-fastify/src/scheduler.ts`, `packages/gateway-fastify/src/scheduler.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Cron dispatch reuses the same chat/run orchestrators as live WebSocket traffic, so behavior stays aligned without duplicating routing, transcript, or session-state logic.
+  - The scheduler loop deduplicates via `findByFireTime(...)` before dispatch, which prevents double execution even without lease-based claiming at the in-memory store level.
+  - `buildCronAuthContext(...)` synthesizes a gateway auth context from the job target, so cron work runs under an explicit principal without requiring a real JWT.
+---
+
+## 2026-04-09 10:35 IST - US-023
+Thread: https://ampcode.com/threads/T-019d709a-84c3-748d-9fb0-778b0930f20e
+- Added `deliverCronResult(...)` with support for delivery modes: `session` (appends system transcript message), `announce` (channel-based, stubbed for later fanout), `webhook` (HTTP POST with completion payload), and `none`.
+- Webhook delivery includes `X-Webhook-Secret` header when configured and reports HTTP/fetch errors.
+- Added `resolveCronRunStatusForApproval(...)` to map approval-blocked cron runs to `needs_review` or `failed` based on policy.
+- Files changed: `packages/gateway-fastify/src/cron-delivery.ts`, `packages/gateway-fastify/src/cron-delivery.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Webhook delivery posts a `cron.completed` payload with jobId, cronRunId, status, and run linkage; the shape is stable for external consumers.
+  - Session delivery appends a `system` role transcript message so cron results appear naturally in the session chat history.
+  - Announce delivery is intentionally minimal; full channel fanout can be wired in later through the subscription manager.
+---
+
+## 2026-04-09 10:35 IST - US-024
+Thread: https://ampcode.com/threads/T-019d709a-84c3-748d-9fb0-778b0930f20e
+- Added `restoreActiveSession(...)` that recovers session state on reconnect, including `session.opened` and `session.updated` frames, pending approval state, and authorized channel subscriptions.
+- Reconnecting sockets receive current status, active run linkage, and are auto-subscribed to session, run, root-run, and agent channels.
+- Pending approval sessions surface their outstanding runId and rootRunId after reconnect.
+- Files changed: `packages/gateway-fastify/src/reconnect.ts`, `packages/gateway-fastify/src/reconnect.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Reconnect auto-subscribes the client to the relevant channels based on active session state, so observers immediately see in-flight run events without an extra `channel.subscribe` frame.
+  - The reconnect helper does not duplicate channels when `currentRunId === currentRootRunId`.
+  - Reconnect reuses the same ownership checks as `getAuthorizedGatewaySession(...)` — different principals are always rejected.
+---
