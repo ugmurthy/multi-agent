@@ -15,3 +15,4 @@ export * from './stores.js';
 export * from './channels.js';
 export * from './outbound.js';
 export * from './hooks.js';
+export * from './stores-file.js';
