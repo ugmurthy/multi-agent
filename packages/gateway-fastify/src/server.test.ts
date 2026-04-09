@@ -7,7 +7,7 @@ import type { GatewayConfig } from './config.js';
 import type { AgentConfig, LoadedConfig } from './config.js';
 import { createModuleRegistry } from './registries.js';
 import { createGatewayServer, handleGatewaySocketMessage } from './server.js';
-import { createInMemoryGatewayStores } from './stores.js';
+import { createInMemoryGatewayStores, type GatewaySessionRecord } from './stores.js';
 
 const baseConfig: GatewayConfig = {
   server: {
@@ -958,6 +958,245 @@ describe('createGatewayServer', () => {
     expect(resolveApproval).not.toHaveBeenCalled();
     expect(resume).not.toHaveBeenCalled();
   });
+
+  it('allows same-principal observers to reattach while rejecting new writes on running sessions', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    const chat = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-late-chat',
+      output: 'ok',
+      stepsUsed: 1,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0.0001 },
+    }));
+    const run = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-late-structured',
+      output: { ok: true },
+      stepsUsed: 1,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0.0001 },
+    }));
+    const agentRegistry = createGatewayTestAgentRegistry({
+      chat,
+      run,
+      runtimeRuns: {},
+    });
+
+    await createStoredSession(stores, {
+      agentId: 'support-agent',
+      invocationMode: 'chat',
+      status: 'running',
+      currentRunId: 'run-active',
+      currentRootRunId: 'root-run-active',
+    });
+
+    const reattach = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'session.open',
+        sessionId: 'session-1',
+        channelId: 'webchat',
+      }),
+      {
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:12:00.000Z'),
+      },
+    );
+
+    expect(reattach).toEqual({
+      type: 'session.opened',
+      sessionId: 'session-1',
+      channelId: 'webchat',
+      agentId: 'support-agent',
+      status: 'running',
+    });
+
+    const messageResponse = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'message.send',
+        sessionId: 'session-1',
+        content: 'Can I interrupt this run?',
+      }),
+      {
+        gatewayConfig: createChatGatewayConfig(),
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:13:00.000Z'),
+      },
+    );
+
+    expect(messageResponse).toEqual({
+      type: 'error',
+      code: 'session_busy',
+      message: 'Session "session-1" already has an active root run and cannot accept frame type "message.send".',
+      requestType: 'message.send',
+      details: {
+        sessionId: 'session-1',
+        status: 'running',
+        currentRunId: 'run-active',
+        currentRootRunId: 'root-run-active',
+      },
+    });
+
+    const runResponse = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'run.start',
+        sessionId: 'session-1',
+        goal: 'Start another run anyway',
+      }),
+      {
+        gatewayConfig: createChatGatewayConfig(),
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:14:00.000Z'),
+      },
+    );
+
+    expect(runResponse).toEqual({
+      type: 'error',
+      code: 'session_busy',
+      message: 'Session "session-1" already has an active root run and cannot accept frame type "run.start".',
+      requestType: 'run.start',
+      details: {
+        sessionId: 'session-1',
+        status: 'running',
+        currentRunId: 'run-active',
+        currentRootRunId: 'root-run-active',
+      },
+    });
+    expect(chat).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('accepts only approval.resolve while a session is awaiting approval', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    const chat = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-chat-after-approval',
+      output: 'ok',
+      stepsUsed: 1,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0.0001 },
+    }));
+    const run = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-after-approval',
+      output: { ok: true },
+      stepsUsed: 1,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0.0001 },
+    }));
+    const resolveApproval = vi.fn(async () => undefined);
+    const resume = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-awaiting',
+      output: { resumed: true },
+      stepsUsed: 2,
+      usage: { promptTokens: 2, completionTokens: 1, estimatedCostUSD: 0.0002 },
+    }));
+    const agentRegistry = createGatewayTestAgentRegistry({
+      chat,
+      run,
+      resolveApproval,
+      resume,
+      runtimeRuns: {
+        'run-awaiting': { id: 'run-awaiting', rootRunId: 'root-run-awaiting', status: 'awaiting_approval' },
+      },
+    });
+
+    await createStoredSession(stores, {
+      agentId: 'support-agent',
+      invocationMode: 'run',
+      status: 'awaiting_approval',
+      currentRunId: 'run-awaiting',
+      currentRootRunId: 'root-run-awaiting',
+    });
+
+    const messageResponse = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'message.send',
+        sessionId: 'session-1',
+        content: 'Let me add more input first',
+      }),
+      {
+        gatewayConfig: createChatGatewayConfig(),
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:15:00.000Z'),
+      },
+    );
+
+    expect(messageResponse).toEqual({
+      type: 'error',
+      code: 'approval_required',
+      message: 'Session "session-1" is awaiting approval and only approval.resolve may mutate it.',
+      requestType: 'message.send',
+      details: {
+        sessionId: 'session-1',
+        status: 'awaiting_approval',
+        currentRunId: 'run-awaiting',
+        currentRootRunId: 'root-run-awaiting',
+      },
+    });
+
+    const runResponse = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'run.start',
+        sessionId: 'session-1',
+        goal: 'Start another run before approving',
+      }),
+      {
+        gatewayConfig: createChatGatewayConfig(),
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:16:00.000Z'),
+      },
+    );
+
+    expect(runResponse).toEqual({
+      type: 'error',
+      code: 'approval_required',
+      message: 'Session "session-1" is awaiting approval and only approval.resolve may mutate it.',
+      requestType: 'run.start',
+      details: {
+        sessionId: 'session-1',
+        status: 'awaiting_approval',
+        currentRunId: 'run-awaiting',
+        currentRootRunId: 'root-run-awaiting',
+      },
+    });
+
+    const approvalResponse = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'approval.resolve',
+        sessionId: 'session-1',
+        runId: 'run-awaiting',
+        approved: true,
+      }),
+      {
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:17:00.000Z'),
+      },
+    );
+
+    expect(approvalResponse).toEqual({
+      type: 'run.output',
+      runId: 'run-awaiting',
+      rootRunId: 'root-run-awaiting',
+      sessionId: 'session-1',
+      status: 'succeeded',
+      output: { resumed: true },
+    });
+    expect(chat).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    expect(resolveApproval).toHaveBeenCalledWith('run-awaiting', true);
+    expect(resume).toHaveBeenCalledWith('run-awaiting');
+  });
 });
 
 function createAuthContext(subject: string): GatewayAuthContext {
@@ -1062,6 +1301,23 @@ function createGatewayTestAgentRegistry(
         planStore: undefined,
       },
     }),
+  });
+}
+
+async function createStoredSession(
+  stores: ReturnType<typeof createInMemoryGatewayStores>,
+  overrides: Partial<GatewaySessionRecord> = {},
+): Promise<GatewaySessionRecord> {
+  return stores.sessions.create({
+    id: 'session-1',
+    channelId: 'webchat',
+    authSubject: 'user-123',
+    tenantId: 'acme',
+    status: 'idle',
+    transcriptVersion: 0,
+    createdAt: '2026-04-08T10:00:00.000Z',
+    updatedAt: '2026-04-08T10:00:00.000Z',
+    ...overrides,
   });
 }
 

@@ -5,7 +5,7 @@ import type { JsonObject, JsonValue, RunResult } from './core.js';
 import type { ApprovalRequestedFrame, ApprovalResolveFrame, RunOutputFrame, RunStartFrame } from './protocol.js';
 import { ProtocolValidationError } from './protocol.js';
 import { resolveGatewayRoute } from './routing.js';
-import { assertGatewayPendingApproval, getAuthorizedGatewaySession } from './session.js';
+import { assertGatewaySessionWriteAllowed, getAuthorizedGatewaySession } from './session.js';
 import type { GatewaySessionRecord, GatewayStores } from './stores.js';
 
 export interface ExecuteGatewayRunStartOptions {
@@ -36,6 +36,7 @@ export async function executeGatewayRunStart(
       stores: options.stores,
       requestType: frame.type,
     });
+    assertGatewaySessionWriteAllowed(session, frame.type);
     assertChannelAllowsInvocation(options.gatewayConfig, session.channelId, 'run', frame.type);
 
     const route = resolveGatewayRoute({
@@ -139,7 +140,9 @@ export async function executeGatewayApprovalResolution(
     stores: options.stores,
     requestType: frame.type,
   });
-  assertGatewayPendingApproval(session, frame.runId, frame.type);
+  assertGatewaySessionWriteAllowed(session, frame.type, {
+    allowPendingApprovalRunId: frame.runId,
+  });
 
   const agentId = session.agentId;
   if (!agentId) {

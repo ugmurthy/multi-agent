@@ -31,6 +31,8 @@ export const PROTOCOL_ERROR_CODES = [
   'token_expired',
   'session_not_found',
   'session_forbidden',
+  'session_busy',
+  'approval_required',
   'route_not_found',
   'run_failed',
 ] as const;

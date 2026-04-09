@@ -19,6 +19,10 @@ export interface GetAuthorizedGatewaySessionOptions {
   expectedChannelId?: string;
 }
 
+export interface AssertGatewaySessionWriteAllowedOptions {
+  allowPendingApprovalRunId?: string;
+}
+
 export async function openGatewaySession(
   frame: SessionOpenFrame,
   options: OpenGatewaySessionOptions,
@@ -177,6 +181,49 @@ export function assertGatewayPendingApproval(
           sessionId: session.id,
           runId,
           currentRunId: session.currentRunId,
+        },
+      },
+    );
+  }
+}
+
+export function assertGatewaySessionWriteAllowed(
+  session: GatewaySessionRecord,
+  requestType: string,
+  options: AssertGatewaySessionWriteAllowedOptions = {},
+): void {
+  if (session.status === 'running') {
+    throw new ProtocolValidationError(
+      'session_busy',
+      `Session "${session.id}" already has an active root run and cannot accept frame type "${requestType}".`,
+      {
+        requestType,
+        details: {
+          sessionId: session.id,
+          status: session.status,
+          currentRunId: session.currentRunId ?? null,
+          currentRootRunId: session.currentRootRunId ?? null,
+        },
+      },
+    );
+  }
+
+  if (options.allowPendingApprovalRunId) {
+    assertGatewayPendingApproval(session, options.allowPendingApprovalRunId, requestType);
+    return;
+  }
+
+  if (session.status === 'awaiting_approval') {
+    throw new ProtocolValidationError(
+      'approval_required',
+      `Session "${session.id}" is awaiting approval and only approval.resolve may mutate it.`,
+      {
+        requestType,
+        details: {
+          sessionId: session.id,
+          status: session.status,
+          currentRunId: session.currentRunId ?? null,
+          currentRootRunId: session.currentRootRunId ?? null,
         },
       },
     );

@@ -7,7 +7,7 @@ import type { JsonObject, JsonValue } from './core.js';
 import type { ApprovalRequestedFrame, MessageOutputFrame, MessageSendFrame } from './protocol.js';
 import { ProtocolValidationError } from './protocol.js';
 import { resolveGatewayRoute } from './routing.js';
-import { getAuthorizedGatewaySession } from './session.js';
+import { assertGatewaySessionWriteAllowed, getAuthorizedGatewaySession } from './session.js';
 import type { GatewaySessionRecord, GatewayStores, TranscriptMessageRecord, TranscriptMessageRole } from './stores.js';
 import { buildTranscriptReplayEnvelope, buildTranscriptSummary, resolveGatewayTranscriptPolicy } from './transcript.js';
 
@@ -30,6 +30,7 @@ export async function executeGatewayChatTurn(
     stores: options.stores,
     requestType: frame.type,
   });
+  assertGatewaySessionWriteAllowed(session, frame.type);
   const route = resolveGatewayRoute({
     gatewayConfig: options.gatewayConfig,
     agentRegistry: options.agentRegistry,

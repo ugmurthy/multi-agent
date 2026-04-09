@@ -145,3 +145,13 @@ Thread: https://ampcode.com/threads/T-019d700a-a7d9-7318-9eb6-9a2bd8444606
   - Approval resume should reuse the original session-run link instead of appending a second link, because the resumed work is still part of the same root run.
   - Moving the session back to `running` before `resume(...)` keeps the gateway's write lane aligned with the runtime while the paused run is being continued.
 ---
+
+## 2026-04-09 08:02 IST - US-015
+Thread: https://ampcode.com/threads/T-019d700a-a7d9-7318-9eb6-9a2bd8444606
+- Added a shared session write-lane guard so `message.send`, `run.start`, and `approval.resolve` now enforce a single active root run, reject non-approval writes while a session is `awaiting_approval`, and still allow same-principal observers to reattach.
+- Files changed: `packages/gateway-fastify/src/protocol.ts`, `packages/gateway-fastify/src/session.ts`, `packages/gateway-fastify/src/chat.ts`, `packages/gateway-fastify/src/run.ts`, `packages/gateway-fastify/src/server.test.ts`, `tasks/prd.json`, `tasks/progress.txt`.
+- **Learnings for future iterations:**
+  - Keep session-state concurrency checks centralized in `src/session.ts`; handler-specific status guards drift quickly once chat, run, and approval paths evolve independently.
+  - Use protocol-level error codes such as `session_busy` and `approval_required` for session-state contention so multi-client behavior stays stable and testable.
+  - Session reattachment should remain read-safe even while a run is active, so concurrency enforcement belongs on write frames rather than on `session.open`.
+---
