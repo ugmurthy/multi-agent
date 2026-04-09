@@ -32,6 +32,7 @@ export const PROTOCOL_ERROR_CODES = [
   'session_not_found',
   'session_forbidden',
   'route_not_found',
+  'run_failed',
 ] as const;
 
 export type InboundFrameType = (typeof INBOUND_FRAME_TYPES)[number];

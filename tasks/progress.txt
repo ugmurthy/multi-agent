@@ -8,6 +8,7 @@
 - Keep routing deterministic and host-owned; bindings and session pinning decide `agentId`, not model output.
 - Evaluate binding specificity in `packages/gateway-fastify` as channel, then tenant, then roles, and break equal-specificity ties by config order so routing stays deterministic and auditable.
 - Keep the rolling transcript summary on the gateway session record and derive replay envelopes from `session.transcriptSummary` plus the recent raw transcript window; do not move chat history ownership into the core runtime.
+- For `message.send`, build the replay envelope in memory first and only persist transcript records after the chat result is known so failed turns do not corrupt prior session history.
 - Gateway stores own sessions, transcripts, session-run links, and cron metadata; runtime stores remain authoritative for execution facts.
 - Per session, enforce a single write lane and a single active root run while allowing multiple same-principal observers.
 - Reuse one orchestrator for WebSocket traffic and cron-triggered work so chat, run, and approval behavior stay aligned.
@@ -113,4 +114,14 @@ Thread: https://ampcode.com/threads/T-019d6fa7-b7b4-71ec-ac7f-decdeb062504
   - Transcript replay is now gateway-owned and deterministic: `buildTranscriptReplayEnvelope(...)` consumes the session summary plus the recent stored messages without needing runtime snapshots.
   - The transcript policy defaults are intentionally conservative and can be overridden in gateway config, which lets later stories tune replay size without rewriting orchestrator logic.
   - `src/core.ts` now mirrors the `chat()`/run result shapes the gateway needs, so later orchestration code can stay type-safe without importing `packages/core/src` directly.
+---
+
+## 2026-04-09 06:16 IST - US-012
+Thread: https://ampcode.com/threads/T-019d6fa7-b7b4-71ec-ac7f-decdeb062504
+- Wired `message.send` through authorized session lookup, deterministic routing, transcript replay, `agent.chat(...)`, session-run linkage persistence, and stable success/failure protocol frames.
+- Files changed: `packages/gateway-fastify/src/chat.ts`, `packages/gateway-fastify/src/server.ts`, `packages/gateway-fastify/src/session.ts`, `packages/gateway-fastify/src/server.test.ts`, `packages/gateway-fastify/src/stores.test.ts`, `packages/gateway-fastify/src/bootstrap.ts`, `packages/gateway-fastify/src/index.ts`, `packages/gateway-fastify/src/protocol.ts`, `tasks/prd.json`, `tasks/progress.txt`.
+- **Learnings for future iterations:**
+  - `getAuthorizedGatewaySession(...)` is now the shared ownership check for post-open session operations, so later run/approval handlers should reuse it instead of reimplementing auth checks.
+  - The chat orchestrator resolves `rootRunId` from the runtime run store after `agent.chat(...)`, which keeps gateway linkage authoritative without assuming `runId === rootRunId` forever.
+  - Approval-requested chat turns already persist the user message and leave the session in `awaiting_approval`, which gives later approval/resume work a stable starting point.
 ---

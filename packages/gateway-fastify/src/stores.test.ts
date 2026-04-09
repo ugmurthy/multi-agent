@@ -20,6 +20,7 @@ describe('gateway in-memory stores', () => {
       tenantId: 'acme',
       status: 'idle',
       transcriptVersion: 0,
+      transcriptSummary: undefined,
       metadata: { locale: 'en-US' },
       createdAt: '2026-04-08T10:00:00.000Z',
       updatedAt: '2026-04-08T10:00:00.000Z',

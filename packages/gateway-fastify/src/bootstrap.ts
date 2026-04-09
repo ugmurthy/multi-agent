@@ -62,6 +62,7 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
   const app = await createGatewayServer(loadedGatewayConfig.config, {
     fastify: options.fastify,
     auth: gatewayModules.auth,
+    agentRegistry,
     stores,
   });
 

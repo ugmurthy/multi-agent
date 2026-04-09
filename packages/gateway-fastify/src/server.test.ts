@@ -1,7 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { CreatedAdaptiveAgent, DelegateDefinition, ToolDefinition } from './core.js';
 import type { GatewayAuthContext } from './auth.js';
+import { createAgentRegistry } from './agent-registry.js';
 import type { GatewayConfig } from './config.js';
+import type { AgentConfig, LoadedConfig } from './config.js';
+import { createModuleRegistry } from './registries.js';
 import { createGatewayServer, handleGatewaySocketMessage } from './server.js';
 import { createInMemoryGatewayStores } from './stores.js';
 
@@ -124,6 +128,7 @@ describe('createGatewayServer', () => {
       currentRootRunId: undefined,
       lastCompletedRootRunId: undefined,
       transcriptVersion: 0,
+      transcriptSummary: undefined,
       metadata: { locale: 'en-US' },
       createdAt: '2026-04-08T10:00:00.000Z',
       updatedAt: '2026-04-08T10:00:00.000Z',
@@ -219,6 +224,202 @@ describe('createGatewayServer', () => {
       updatedAt: '2026-04-08T10:00:00.000Z',
     });
   });
+
+  it('executes message.send through the routed agent and persists transcript state', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    const chat = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-1',
+      output: 'Hello back',
+      stepsUsed: 1,
+      usage: { promptTokens: 11, completionTokens: 5, estimatedCostUSD: 0.001 },
+    }));
+    const agentRegistry = createGatewayTestAgentRegistry(chat, {
+      'run-1': { id: 'run-1', rootRunId: 'run-1', status: 'succeeded' },
+    });
+    const chatConfig = createChatGatewayConfig();
+
+    await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'session.open',
+        channelId: 'webchat',
+      }),
+      {
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:00:00.000Z'),
+        sessionIdFactory: () => 'session-1',
+      },
+    );
+
+    const response = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'message.send',
+        sessionId: 'session-1',
+        content: 'Hello gateway',
+        metadata: { locale: 'en-US' },
+      }),
+      {
+        gatewayConfig: chatConfig,
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:01:00.000Z'),
+        transcriptMessageIdFactory: createSequentialIdFactory(['message-1', 'message-2']),
+      },
+    );
+
+    expect(response).toEqual({
+      type: 'message.output',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      rootRunId: 'run-1',
+      message: {
+        role: 'assistant',
+        content: 'Hello back',
+      },
+    });
+    expect(chat).toHaveBeenCalledWith({
+      messages: [{ role: 'user', content: 'Hello gateway' }],
+      context: {
+        sessionId: 'session-1',
+        channelId: 'webchat',
+        authSubject: 'user-123',
+        invocationMode: 'chat',
+        tenantId: 'acme',
+        roles: ['member'],
+      },
+      metadata: {
+        locale: 'en-US',
+        gateway: {
+          sessionId: 'session-1',
+          agentId: 'support-agent',
+          invocationMode: 'chat',
+        },
+      },
+    });
+    expect(await stores.transcriptMessages.listBySession('session-1')).toEqual([
+      {
+        id: 'message-1',
+        sessionId: 'session-1',
+        sequence: 1,
+        role: 'user',
+        content: 'Hello gateway',
+        metadata: { locale: 'en-US' },
+        createdAt: '2026-04-08T10:01:00.000Z',
+      },
+      {
+        id: 'message-2',
+        sessionId: 'session-1',
+        sequence: 2,
+        role: 'assistant',
+        content: 'Hello back',
+        metadata: undefined,
+        createdAt: '2026-04-08T10:01:00.000Z',
+      },
+    ]);
+    expect(await stores.sessions.get('session-1')).toMatchObject({
+      agentId: 'support-agent',
+      invocationMode: 'chat',
+      status: 'idle',
+      currentRunId: undefined,
+      currentRootRunId: undefined,
+      lastCompletedRootRunId: 'run-1',
+      transcriptVersion: 2,
+      updatedAt: '2026-04-08T10:01:00.000Z',
+    });
+    expect(await stores.sessionRunLinks.listBySession('session-1')).toEqual([
+      {
+        sessionId: 'session-1',
+        runId: 'run-1',
+        rootRunId: 'run-1',
+        invocationKind: 'chat',
+        turnIndex: 1,
+        metadata: { locale: 'en-US' },
+        createdAt: '2026-04-08T10:01:00.000Z',
+      },
+    ]);
+  });
+
+  it('preserves prior transcript history and marks the session failed when chat turns fail', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    const chat = vi.fn(async () => ({
+      status: 'failure' as const,
+      runId: 'run-2',
+      error: 'Model adapter failed',
+      code: 'MODEL_ERROR' as const,
+      stepsUsed: 1,
+      usage: { promptTokens: 7, completionTokens: 0, estimatedCostUSD: 0.0004 },
+    }));
+    const agentRegistry = createGatewayTestAgentRegistry(chat, {
+      'run-2': { id: 'run-2', rootRunId: 'run-2', status: 'failed' },
+    });
+
+    await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'session.open',
+        channelId: 'webchat',
+      }),
+      {
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:00:00.000Z'),
+        sessionIdFactory: () => 'session-1',
+      },
+    );
+
+    const response = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'message.send',
+        sessionId: 'session-1',
+        content: 'This should fail',
+      }),
+      {
+        gatewayConfig: createChatGatewayConfig(),
+        agentRegistry,
+        authContext,
+        stores,
+        now: () => new Date('2026-04-08T10:01:00.000Z'),
+      },
+    );
+
+    expect(response).toEqual({
+      type: 'error',
+      code: 'run_failed',
+      message: 'Model adapter failed',
+      requestType: 'message.send',
+      details: {
+        sessionId: 'session-1',
+        runId: 'run-2',
+        rootRunId: 'run-2',
+        code: 'MODEL_ERROR',
+      },
+    });
+    expect(await stores.transcriptMessages.listBySession('session-1')).toEqual([]);
+    expect(await stores.sessions.get('session-1')).toMatchObject({
+      agentId: 'support-agent',
+      invocationMode: 'chat',
+      status: 'failed',
+      currentRunId: undefined,
+      currentRootRunId: undefined,
+      lastCompletedRootRunId: 'run-2',
+      transcriptVersion: 0,
+      updatedAt: '2026-04-08T10:01:00.000Z',
+    });
+    expect(await stores.sessionRunLinks.listBySession('session-1')).toEqual([
+      {
+        sessionId: 'session-1',
+        runId: 'run-2',
+        rootRunId: 'run-2',
+        invocationKind: 'chat',
+        turnIndex: 1,
+        metadata: undefined,
+        createdAt: '2026-04-08T10:01:00.000Z',
+      },
+    ]);
+  });
 });
 
 function createAuthContext(subject: string): GatewayAuthContext {
@@ -227,6 +428,98 @@ function createAuthContext(subject: string): GatewayAuthContext {
     tenantId: 'acme',
     roles: ['member'],
     claims: { sub: subject, tenantId: 'acme', roles: ['member'] },
+  };
+}
+
+function createChatGatewayConfig(): GatewayConfig {
+  return {
+    ...baseConfig,
+    transcript: {
+      recentMessageWindow: 2,
+      summaryTriggerWindow: 2,
+      summaryMaxMessages: 4,
+      summaryLineMaxLength: 80,
+    },
+    bindings: [
+      {
+        match: { channelId: 'webchat' },
+        agentId: 'support-agent',
+      },
+    ],
+    defaultAgentId: 'support-agent',
+  };
+}
+
+function createTool(name: string): ToolDefinition {
+  return {
+    name,
+    description: `${name} tool`,
+    inputSchema: { type: 'object', additionalProperties: true },
+    execute: async () => ({ ok: true }),
+  };
+}
+
+function createDelegate(name: string): DelegateDefinition {
+  return {
+    name,
+    description: `${name} delegate`,
+    allowedTools: [],
+  };
+}
+
+function createLoadedAgentConfig(): LoadedConfig<AgentConfig> {
+  return {
+    path: '/tmp/support-agent.json',
+    config: {
+      id: 'support-agent',
+      name: 'Support Agent',
+      invocationModes: ['chat', 'run'],
+      defaultInvocationMode: 'chat',
+      model: {
+        provider: 'ollama',
+        model: 'qwen3.5',
+      },
+      tools: ['read_file'],
+      delegates: ['researcher'],
+    },
+  };
+}
+
+function createGatewayTestAgentRegistry(
+  chat: CreatedAdaptiveAgent['agent']['chat'],
+  runtimeRuns: Record<string, { id: string; rootRunId: string; status: string }>,
+) {
+  return createAgentRegistry({
+    agents: [createLoadedAgentConfig()],
+    moduleRegistry: createModuleRegistry({
+      tools: [createTool('read_file')],
+      delegates: [createDelegate('researcher')],
+    }),
+    agentFactory: async () => ({
+      agent: {
+        chat,
+      },
+      runtime: {
+        runStore: {
+          getRun: async (runId: string) => runtimeRuns[runId] ?? null,
+        },
+        eventStore: {},
+        snapshotStore: {},
+        planStore: undefined,
+      },
+    }),
+  });
+}
+
+function createSequentialIdFactory(ids: string[]): () => string {
+  const pendingIds = [...ids];
+  return () => {
+    const nextId = pendingIds.shift();
+    if (!nextId) {
+      throw new Error('No more transcript ids available.');
+    }
+
+    return nextId;
   };
 }
 

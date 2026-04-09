@@ -12,6 +12,13 @@ export interface OpenGatewaySessionOptions {
   sessionIdFactory?: () => string;
 }
 
+export interface GetAuthorizedGatewaySessionOptions {
+  authContext?: GatewayAuthContext;
+  stores: GatewayStores;
+  requestType: string;
+  expectedChannelId?: string;
+}
+
 export async function openGatewaySession(
   frame: SessionOpenFrame,
   options: OpenGatewaySessionOptions,
@@ -43,6 +50,7 @@ export async function openGatewaySession(
     currentRootRunId: undefined,
     lastCompletedRootRunId: undefined,
     transcriptVersion: 0,
+    transcriptSummary: undefined,
     metadata: frame.metadata,
     createdAt: now,
     updatedAt: now,
@@ -58,46 +66,12 @@ async function openExistingSession(
   authContext: GatewayAuthContext,
   now: string,
 ): Promise<SessionOpenedFrame> {
-  const sessionId = frame.sessionId!;
-  const session = await stores.sessions.get(sessionId);
-  if (!session) {
-    throw new ProtocolValidationError('session_not_found', `Session "${sessionId}" does not exist.`, {
-      requestType: frame.type,
-      details: {
-        sessionId,
-        channelId: frame.channelId,
-      },
-    });
-  }
-
-  if (session.authSubject !== authContext.subject) {
-    throw new ProtocolValidationError(
-      'session_forbidden',
-      `Session "${sessionId}" belongs to a different authenticated principal.`,
-      {
-        requestType: frame.type,
-        details: {
-          sessionId,
-          channelId: session.channelId,
-        },
-      },
-    );
-  }
-
-  if (session.channelId !== frame.channelId) {
-    throw new ProtocolValidationError(
-      'invalid_frame',
-      `Session "${sessionId}" belongs to channel "${session.channelId}", not "${frame.channelId}".`,
-      {
-        requestType: frame.type,
-        details: {
-          sessionId,
-          channelId: frame.channelId,
-          expectedChannelId: session.channelId,
-        },
-      },
-    );
-  }
+  const session = await getAuthorizedGatewaySession(frame.sessionId!, {
+    authContext,
+    stores,
+    requestType: frame.type,
+    expectedChannelId: frame.channelId,
+  });
 
   const updatedSession: GatewaySessionRecord = {
     ...session,
@@ -116,4 +90,59 @@ function toSessionOpenedFrame(session: GatewaySessionRecord): SessionOpenedFrame
     agentId: session.agentId,
     status: session.status,
   };
+}
+
+export async function getAuthorizedGatewaySession(
+  sessionId: string,
+  options: GetAuthorizedGatewaySessionOptions,
+): Promise<GatewaySessionRecord> {
+  if (!options.authContext) {
+    throw new ProtocolValidationError(
+      'auth_required',
+      `An authenticated principal is required to access session "${sessionId}".`,
+      {
+        requestType: options.requestType,
+        details: { sessionId },
+      },
+    );
+  }
+
+  const session = await options.stores.sessions.get(sessionId);
+  if (!session) {
+    throw new ProtocolValidationError('session_not_found', `Session "${sessionId}" does not exist.`, {
+      requestType: options.requestType,
+      details: { sessionId },
+    });
+  }
+
+  if (session.authSubject !== options.authContext.subject) {
+    throw new ProtocolValidationError(
+      'session_forbidden',
+      `Session "${sessionId}" belongs to a different authenticated principal.`,
+      {
+        requestType: options.requestType,
+        details: {
+          sessionId,
+          channelId: session.channelId,
+        },
+      },
+    );
+  }
+
+  if (options.expectedChannelId && session.channelId !== options.expectedChannelId) {
+    throw new ProtocolValidationError(
+      'invalid_frame',
+      `Session "${sessionId}" belongs to channel "${session.channelId}", not "${options.expectedChannelId}".`,
+      {
+        requestType: options.requestType,
+        details: {
+          sessionId,
+          channelId: options.expectedChannelId,
+          expectedChannelId: session.channelId,
+        },
+      },
+    );
+  }
+
+  return session;
 }

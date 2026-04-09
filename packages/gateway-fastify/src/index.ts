@@ -6,6 +6,7 @@ export * from './registries.js';
 export * from './agent-registry.js';
 export * from './routing.js';
 export * from './transcript.js';
+export * from './chat.js';
 export * from './session.js';
 export * from './server.js';
 export * from './bootstrap.js';

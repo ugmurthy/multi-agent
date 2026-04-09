@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import websocket from '@fastify/websocket';
 
+import type { AgentRegistry } from './agent-registry.js';
 import {
   GatewayAuthError,
   authenticateGatewayUpgrade,
@@ -8,6 +9,7 @@ import {
   type GatewayAuthContext,
   type GatewayUpgradeQuery,
 } from './auth.js';
+import { executeGatewayChatTurn } from './chat.js';
 import type { GatewayConfig } from './config.js';
 import {
   ProtocolValidationError,
@@ -25,16 +27,21 @@ import { createInMemoryGatewayStores, type GatewayStores } from './stores.js';
 export interface CreateGatewayServerOptions {
   fastify?: FastifyServerOptions;
   auth?: ResolvedGatewayAuthProvider;
+  agentRegistry?: AgentRegistry;
   stores?: GatewayStores;
   now?: () => Date;
   sessionIdFactory?: () => string;
+  transcriptMessageIdFactory?: () => string;
 }
 
 export interface GatewaySocketMessageContext {
+  gatewayConfig?: GatewayConfig;
+  agentRegistry?: AgentRegistry;
   authContext?: GatewayAuthContext;
   stores?: GatewayStores;
   now?: () => Date;
   sessionIdFactory?: () => string;
+  transcriptMessageIdFactory?: () => string;
 }
 
 export async function createGatewayServer(
@@ -74,10 +81,13 @@ export async function createGatewayServer(
     (socket, request) => {
       socket.on('message', async (message: unknown) => {
         const frame = await handleGatewaySocketMessage(message, {
+          gatewayConfig: config,
+          agentRegistry: options.agentRegistry,
           authContext: request.gatewayAuthContext,
           stores,
           now: options.now,
           sessionIdFactory: options.sessionIdFactory,
+          transcriptMessageIdFactory: options.transcriptMessageIdFactory,
         });
 
         socket.send(serializeOutboundFrame(frame));
@@ -111,6 +121,17 @@ export async function handleGatewaySocketMessage(
         stores: context.stores,
         now: context.now,
         sessionIdFactory: context.sessionIdFactory,
+      });
+    }
+
+    if (frame.type === 'message.send' && context.stores && context.gatewayConfig && context.agentRegistry) {
+      return await executeGatewayChatTurn(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        now: context.now,
+        transcriptMessageIdFactory: context.transcriptMessageIdFactory,
       });
     }
 
