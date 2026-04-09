@@ -12,6 +12,9 @@
 - Gateway stores own sessions, transcripts, session-run links, and cron metadata; runtime stores remain authoritative for execution facts.
 - Per session, enforce a single write lane and a single active root run while allowing multiple same-principal observers.
 - Reuse one orchestrator for WebSocket traffic and cron-triggered work so chat, run, and approval behavior stay aligned.
+- Channel subscriptions use `scope:id` format; parse with `parseChannelId(...)` and manage with `createChannelSubscriptionManager()`.
+- Redact outbound event data with `redactSensitiveMetadata(...)` and project auth contexts with `redactAuthClaims(...)` before delivering to clients.
+- Execute gateway hooks via `executeHookSlot(hooks, slot, context)` which handles ordering, rejection, enrichment, and failure policy consistently.
 
 
 ## 2026-04-08 16:01 IST - US-001
@@ -154,4 +157,34 @@ Thread: https://ampcode.com/threads/T-019d700a-a7d9-7318-9eb6-9a2bd8444606
   - Keep session-state concurrency checks centralized in `src/session.ts`; handler-specific status guards drift quickly once chat, run, and approval paths evolve independently.
   - Use protocol-level error codes such as `session_busy` and `approval_required` for session-state contention so multi-client behavior stays stable and testable.
   - Session reattachment should remain read-safe even while a run is active, so concurrency enforcement belongs on write frames rather than on `session.open`.
+---
+
+## 2026-04-09 10:01 IST - US-016
+Thread: https://ampcode.com/threads/T-019d707b-b23c-7138-9830-a0838054d9e2
+- Added channel subscription manager with session, run, root-run, and agent scopes; runtime event bridge with full correlation metadata; and `channel.subscribe` handling in the server handler.
+- Files changed: `packages/gateway-fastify/src/channels.ts`, `packages/gateway-fastify/src/channels.test.ts`, `packages/gateway-fastify/src/server.ts`, `packages/gateway-fastify/src/server.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Channel ids use a `scope:id` format (`session:s-1`, `run:r-1`, `root-run:root-1`, `agent:support-agent`) parsed and validated at subscription time.
+  - The subscription manager is a per-connection in-memory structure; later persistence or cross-process fanout can be layered on top without changing the subscription API.
+  - The 10 bridged runtime event types cover the full run lifecycle and delegation tree; custom/unknown events are not bridged by default.
+---
+
+## 2026-04-09 10:01 IST - US-017
+Thread: https://ampcode.com/threads/T-019d707b-b23c-7138-9830-a0838054d9e2
+- Added outbound authorization for channel subscriptions (session ownership check), sensitive metadata redaction (JWT claims and credential keys), and auth claim projection for safe outbound contexts.
+- Files changed: `packages/gateway-fastify/src/outbound.ts`, `packages/gateway-fastify/src/outbound.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Session-scoped subscriptions enforce principal ownership via the session store; non-session scopes (run, root-run, agent) pass through for any authenticated caller.
+  - Redaction uses a static set of known sensitive keys (`token`, `apiKey`, `password`, `secret`, JWT standard claims) and recurses into nested objects and arrays.
+  - `redactAuthClaims(...)` projects only `subject`, `tenantId`, and `roles` from the full auth context, which prevents accidental claim leakage in outbound frames.
+---
+
+## 2026-04-09 10:01 IST - US-018
+Thread: https://ampcode.com/threads/T-019d707b-b23c-7138-9830-a0838054d9e2
+- Added a gateway hook lifecycle with `executeHookSlot(...)` that runs all registered hooks for a given slot in order, supports before-hook rejection and metadata enrichment, and respects the configured failure policy (`fail`, `warn`, `ignore`).
+- Files changed: `packages/gateway-fastify/src/hooks.ts`, `packages/gateway-fastify/src/hooks.test.ts`, `packages/gateway-fastify/src/index.ts`.
+- **Learnings for future iterations:**
+  - Before hooks can reject by returning `{ rejected: true, rejectionReason }` or enrich by returning `{ metadata }`, and enriched metadata flows forward to subsequent hooks in the same slot.
+  - `HookExecutionError` captures `hookId` and `slot` so callers can map failures to specific protocol error codes.
+  - `createEmptyResolvedHooks(...)` is the canonical way to get a hook structure with all slots initialized to empty arrays, useful for tests and default construction.
 ---
