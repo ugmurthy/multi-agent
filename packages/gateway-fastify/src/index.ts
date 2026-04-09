@@ -21,3 +21,4 @@ export * from './stores-postgres-cron.js';
 export * from './scheduler.js';
 export * from './cron-delivery.js';
 export * from './reconnect.js';
+export * from './observability.js';
