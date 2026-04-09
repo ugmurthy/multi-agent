@@ -9,6 +9,11 @@ import {
   type GatewayAuthContext,
   type GatewayUpgradeQuery,
 } from './auth.js';
+import {
+  createChannelSubscriptionManager,
+  validateChannelSubscribeFrame,
+  type ChannelSubscriptionManager,
+} from './channels.js';
 import { executeGatewayChatTurn } from './chat.js';
 import type { GatewayConfig } from './config.js';
 import {
@@ -41,6 +46,7 @@ export interface GatewaySocketMessageContext {
   authContext?: GatewayAuthContext;
   requestedChannelId?: string;
   stores?: GatewayStores;
+  channelManager?: ChannelSubscriptionManager;
   now?: () => Date;
   sessionIdFactory?: () => string;
   transcriptMessageIdFactory?: () => string;
@@ -156,6 +162,32 @@ export async function handleGatewaySocketMessage(
         authContext: context.authContext,
         now: context.now,
       });
+    }
+
+    if (frame.type === 'channel.subscribe') {
+      const manager = context.channelManager ?? createChannelSubscriptionManager();
+      const { valid, invalid } = validateChannelSubscribeFrame(frame);
+
+      if (invalid.length > 0 && valid.length === 0) {
+        return createProtocolErrorFrame(
+          new ProtocolValidationError(
+            'invalid_frame',
+            `No valid channel subscriptions in request. Invalid channels: ${invalid.join(', ')}.`,
+            { requestType: frame.type, details: { invalid } },
+          ),
+        );
+      }
+
+      manager.subscribe(frame.channels);
+
+      return {
+        type: 'session.updated',
+        sessionId: '',
+        status: 'idle',
+        transcriptVersion: 0,
+        activeRunId: undefined,
+        activeRootRunId: undefined,
+      };
     }
 
     return createProtocolErrorFrame(createUnsupportedFrameError(frame.type));

@@ -72,11 +72,12 @@ describe('createGatewayServer', () => {
       id: 'heartbeat-1',
     });
     expect(await handleGatewaySocketMessage(JSON.stringify({ type: 'channel.subscribe', channels: ['session:1'] }))).toEqual({
-      type: 'error',
-      code: 'unsupported_frame',
-      message: 'Inbound frame type "channel.subscribe" is valid but not implemented yet.',
-      requestType: 'channel.subscribe',
-      details: undefined,
+      type: 'session.updated',
+      sessionId: '',
+      status: 'idle',
+      transcriptVersion: 0,
+      activeRunId: undefined,
+      activeRootRunId: undefined,
     });
     expect(await handleGatewaySocketMessage(JSON.stringify({ type: 'mystery.frame' }))).toEqual({
       type: 'error',
