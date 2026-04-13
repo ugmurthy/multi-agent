@@ -4,6 +4,7 @@ import type { AgentRegistryEntry } from './agent-registry.js';
 import { AgentRegistry } from './agent-registry.js';
 import type { GatewayConfig } from './config.js';
 import type { CreatedAdaptiveAgent, RunResult } from './core.js';
+import { createGatewayLogger, GATEWAY_LOG_EVENTS, type GatewayLogEntry } from './observability.js';
 import { createModuleRegistry } from './registries.js';
 import { createInMemoryGatewayStores, type GatewayCronJobRecord, type GatewayStores } from './stores.js';
 import { createSchedulerLoop, executeCronTarget } from './scheduler.js';
@@ -264,6 +265,86 @@ describe('executeCronTarget', () => {
 });
 
 describe('createSchedulerLoop', () => {
+  it('logs cron lifecycle events for successful runs', async () => {
+    const stores = createInMemoryGatewayStores();
+    const job = createDueJob();
+    const logEntries: GatewayLogEntry[] = [];
+    await stores.cronJobs.create(job);
+
+    const scheduler = createSchedulerLoop({
+      gatewayConfig: createTestGatewayConfig(),
+      agentRegistry: createTestAgentRegistry(),
+      stores,
+      logger: createGatewayLogger((entry) => logEntries.push(entry)),
+      leaseOwner: 'test-worker',
+      now: fixedNow,
+      idFactory,
+      pollIntervalMs: 999_999,
+    });
+
+    try {
+      expect(await scheduler.tick()).toBe(1);
+
+      expect(logEntries.map((entry) => entry.event)).toEqual([
+        GATEWAY_LOG_EVENTS.cron_claimed,
+        GATEWAY_LOG_EVENTS.cron_dispatched,
+        GATEWAY_LOG_EVENTS.cron_completed,
+      ]);
+      expect(logEntries[2]).toMatchObject({
+        level: 'info',
+        event: GATEWAY_LOG_EVENTS.cron_completed,
+        data: expect.objectContaining({
+          jobId: 'job-1',
+          status: 'succeeded',
+          targetKind: 'isolated_run',
+        }),
+      });
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it('logs cron failures when dispatch or delivery fails', async () => {
+    const stores = createInMemoryGatewayStores();
+    const job = createDueJob({
+      deliveryMode: 'session',
+    });
+    const logEntries: GatewayLogEntry[] = [];
+    await stores.cronJobs.create(job);
+
+    const scheduler = createSchedulerLoop({
+      gatewayConfig: createTestGatewayConfig(),
+      agentRegistry: createTestAgentRegistry(),
+      stores,
+      logger: createGatewayLogger((entry) => logEntries.push(entry)),
+      leaseOwner: 'test-worker',
+      now: fixedNow,
+      idFactory,
+      pollIntervalMs: 999_999,
+    });
+
+    try {
+      expect(await scheduler.tick()).toBe(1);
+
+      expect(logEntries.map((entry) => entry.event)).toEqual([
+        GATEWAY_LOG_EVENTS.cron_claimed,
+        GATEWAY_LOG_EVENTS.cron_dispatched,
+        GATEWAY_LOG_EVENTS.cron_failed,
+      ]);
+      expect(logEntries[2]).toMatchObject({
+        level: 'error',
+        event: GATEWAY_LOG_EVENTS.cron_failed,
+        data: expect.objectContaining({
+          jobId: 'job-1',
+          status: 'failed',
+          failureStage: 'delivery',
+        }),
+      });
+    } finally {
+      scheduler.stop();
+    }
+  });
+
   it('tick() claims due jobs and dispatches them', async () => {
     const stores = createInMemoryGatewayStores();
     const job = createDueJob();
@@ -286,6 +367,120 @@ describe('createSchedulerLoop', () => {
       const cronRuns = await stores.cronRuns.listByJob(job.id);
       expect(cronRuns).toHaveLength(1);
       expect(cronRuns[0]!.status).toBe('succeeded');
+      expect(cronRuns[0]!.output).toBe('done');
+
+      const updatedJob = await stores.cronJobs.get(job.id);
+      expect(updatedJob?.nextFireAt).toBe('2026-01-01T00:05:00.000Z');
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it('tick() delivers completed cron results to the created session', async () => {
+    const stores = createInMemoryGatewayStores();
+    const job = createDueJob({
+      targetKind: 'isolated_chat',
+      target: {
+        agentId: 'test-agent',
+        content: 'hello from cron',
+        channelId: 'cron-chan',
+      },
+      deliveryMode: 'session',
+    });
+    await stores.cronJobs.create(job);
+
+    const scheduler = createSchedulerLoop({
+      gatewayConfig: createTestGatewayConfig(),
+      agentRegistry: createTestAgentRegistry(),
+      stores,
+      leaseOwner: 'test-worker',
+      now: fixedNow,
+      idFactory,
+      pollIntervalMs: 999_999,
+    });
+
+    try {
+      expect(await scheduler.tick()).toBe(1);
+
+      const cronRuns = await stores.cronRuns.listByJob(job.id);
+      expect(cronRuns).toHaveLength(1);
+      expect(cronRuns[0]!.status).toBe('succeeded');
+      expect(cronRuns[0]!.sessionId).toBeDefined();
+      expect(cronRuns[0]!.output).toBe('done');
+
+      const messages = await stores.transcriptMessages.listBySession(cronRuns[0]!.sessionId!);
+      const deliveryMessages = messages.filter((message) => message.id === `cron-delivery-${cronRuns[0]!.id}`);
+      expect(deliveryMessages).toHaveLength(1);
+      expect(deliveryMessages[0]!.role).toBe('system');
+      expect(deliveryMessages[0]!.content).toContain('[Scheduled job "job-1"] completed successfully');
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it('tick() records delivery failures on the cron run', async () => {
+    const stores = createInMemoryGatewayStores();
+    const job = createDueJob({
+      deliveryMode: 'session',
+    });
+    await stores.cronJobs.create(job);
+
+    const scheduler = createSchedulerLoop({
+      gatewayConfig: createTestGatewayConfig(),
+      agentRegistry: createTestAgentRegistry(),
+      stores,
+      leaseOwner: 'test-worker',
+      now: fixedNow,
+      idFactory,
+      pollIntervalMs: 999_999,
+    });
+
+    try {
+      expect(await scheduler.tick()).toBe(1);
+
+      const cronRuns = await stores.cronRuns.listByJob(job.id);
+      expect(cronRuns).toHaveLength(1);
+      expect(cronRuns[0]!.status).toBe('failed');
+      expect(cronRuns[0]!.error).toContain('Session delivery requires a sessionId');
+      expect(cronRuns[0]!.metadata?.delivery).toEqual({
+        delivered: false,
+        error: 'Session delivery requires a sessionId on the cron run or delivery config.',
+      });
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it('tick() advances nextFireAt so later ticks execute later occurrences', async () => {
+    const stores = createInMemoryGatewayStores();
+    const job = createDueJob();
+    await stores.cronJobs.create(job);
+
+    let now = new Date('2026-01-01T00:05:00.000Z');
+    const scheduler = createSchedulerLoop({
+      gatewayConfig: createTestGatewayConfig(),
+      agentRegistry: createTestAgentRegistry(),
+      stores,
+      leaseOwner: 'test-worker',
+      now: () => now,
+      idFactory,
+      pollIntervalMs: 999_999,
+    });
+
+    try {
+      expect(await scheduler.tick()).toBe(1);
+
+      now = new Date('2026-01-01T00:10:00.000Z');
+      expect(await scheduler.tick()).toBe(1);
+
+      const cronRuns = await stores.cronRuns.listByJob(job.id);
+      expect(cronRuns.map((run) => run.fireTime)).toEqual([
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:05:00.000Z',
+      ]);
+
+      const updatedJob = await stores.cronJobs.get(job.id);
+      expect(updatedJob?.nextFireAt).toBe('2026-01-01T00:10:00.000Z');
     } finally {
       scheduler.stop();
     }
@@ -318,6 +513,9 @@ describe('createSchedulerLoop', () => {
     try {
       const dispatched = await scheduler.tick();
       expect(dispatched).toBe(0);
+
+      const updatedJob = await stores.cronJobs.get(job.id);
+      expect(updatedJob?.nextFireAt).toBe('2026-01-01T00:05:00.000Z');
     } finally {
       scheduler.stop();
     }
@@ -356,6 +554,36 @@ describe('createSchedulerLoop', () => {
       const cronRuns = await stores.cronRuns.listByJob(job.id);
       expect(cronRuns).toHaveLength(1);
       expect(cronRuns[0]!.status).toBe('failed');
+
+      const updatedJob = await stores.cronJobs.get(job.id);
+      expect(updatedJob?.nextFireAt).toBe('2026-01-01T00:05:00.000Z');
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it('disables jobs whose schedule cannot be advanced', async () => {
+    const stores = createInMemoryGatewayStores();
+    const job = createDueJob({ schedule: 'not-a-cron' });
+    await stores.cronJobs.create(job);
+
+    const scheduler = createSchedulerLoop({
+      gatewayConfig: createTestGatewayConfig(),
+      agentRegistry: createTestAgentRegistry(),
+      stores,
+      leaseOwner: 'test-worker',
+      now: fixedNow,
+      idFactory,
+      pollIntervalMs: 999_999,
+    });
+
+    try {
+      const dispatched = await scheduler.tick();
+      expect(dispatched).toBe(1);
+
+      const updatedJob = await stores.cronJobs.get(job.id);
+      expect(updatedJob?.enabled).toBe(false);
+      expect(updatedJob?.nextFireAt).toBe('2026-01-01T00:00:00.000Z');
     } finally {
       scheduler.stop();
     }

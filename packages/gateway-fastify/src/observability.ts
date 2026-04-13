@@ -1,3 +1,6 @@
+import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
+import { join, resolve } from 'node:path';
+
 import type { JsonObject } from './core.js';
 
 export type GatewayHealthState = 'healthy' | 'startup_failed' | 'degraded';
@@ -39,6 +42,9 @@ export interface GatewayCounters {
 }
 
 export type GatewayLogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type GatewayLogDestination = 'console' | 'file' | 'both';
+
+export const DEFAULT_GATEWAY_REQUEST_LOG_DIR = join('data', 'gateway', 'logs');
 
 export interface GatewayLogEntry {
   level: GatewayLogLevel;
@@ -49,6 +55,13 @@ export interface GatewayLogEntry {
 }
 
 export type GatewayLogSink = (entry: GatewayLogEntry) => void;
+
+export interface CreateGatewayLoggerOptions {
+  sink?: GatewayLogSink;
+  destination?: GatewayLogDestination;
+  logDir?: string;
+  now?: () => Date;
+}
 
 export interface GatewayHealthManager {
   getHealth(): GatewayHealthReport;
@@ -70,6 +83,7 @@ export interface GatewayLogger {
   info(event: string, message: string, data?: JsonObject): void;
   warn(event: string, message: string, data?: JsonObject): void;
   error(event: string, message: string, data?: JsonObject): void;
+  close(): Promise<void>;
 }
 
 export function createGatewayHealthManager(options: {
@@ -158,8 +172,14 @@ export function createGatewayMetrics(): GatewayMetrics {
   };
 }
 
-export function createGatewayLogger(sink?: GatewayLogSink): GatewayLogger {
-  const logSink: GatewayLogSink = sink ?? defaultLogSink;
+export function createGatewayLogger(options: GatewayLogSink | CreateGatewayLoggerOptions = {}): GatewayLogger {
+  const resolvedOptions = typeof options === 'function' ? { sink: options } : options;
+  const { sink: logSink, close } = resolvedOptions.sink
+    ? {
+        sink: resolvedOptions.sink,
+        close: async () => {},
+      }
+    : createGatewayLogSink(resolvedOptions);
 
   function log(level: GatewayLogLevel, event: string, message: string, data?: JsonObject): void {
     logSink({
@@ -176,7 +196,110 @@ export function createGatewayLogger(sink?: GatewayLogSink): GatewayLogger {
     info: (event, message, data) => log('info', event, message, data),
     warn: (event, message, data) => log('warn', event, message, data),
     error: (event, message, data) => log('error', event, message, data),
+    close,
   };
+}
+
+function createGatewayLogSink(options: CreateGatewayLoggerOptions): {
+  sink: GatewayLogSink;
+  close: () => Promise<void>;
+} {
+  const destination = options.destination ?? 'console';
+
+  if (destination === 'console') {
+    return {
+      sink: defaultLogSink,
+      close: async () => {},
+    };
+  }
+
+  const fileSink = createGatewayFileLogSink({
+    logDir: options.logDir ?? DEFAULT_GATEWAY_REQUEST_LOG_DIR,
+    now: options.now,
+  });
+
+  if (destination === 'file') {
+    return fileSink;
+  }
+
+  return {
+    sink: (entry) => {
+      defaultLogSink(entry);
+      fileSink.sink(entry);
+    },
+    close: fileSink.close,
+  };
+}
+
+function createGatewayFileLogSink(options: {
+  logDir: string;
+  now?: () => Date;
+}): {
+  sink: GatewayLogSink;
+  close: () => Promise<void>;
+} {
+  const logDir = resolve(options.logDir);
+  const filePath = join(logDir, `gateway-${formatLogDate((options.now ?? (() => new Date()))())}.log`);
+
+  mkdirSync(logDir, { recursive: true });
+
+  const stream = createWriteStream(filePath, {
+    flags: 'a',
+  });
+
+  // Keep request logging best-effort instead of crashing the gateway if the log file becomes unavailable.
+  stream.on('error', (error) => {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        event: 'gateway.request_log_sink.failed',
+        message: 'Gateway request log sink failed',
+        timestamp: new Date().toISOString(),
+        data: {
+          filePath,
+          error: error.message,
+        },
+      }),
+    );
+  });
+
+  return {
+    sink: (entry) => {
+      stream.write(`${JSON.stringify(entry)}\n`);
+    },
+    close: async () => {
+      await closeWriteStream(stream);
+    },
+  };
+}
+
+function formatLogDate(date: Date): string {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+async function closeWriteStream(stream: WriteStream): Promise<void> {
+  if (stream.closed || stream.destroyed) {
+    return;
+  }
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const handleError = (error: Error) => {
+      stream.off('finish', handleFinish);
+      rejectPromise(error);
+    };
+
+    const handleFinish = () => {
+      stream.off('error', handleError);
+      resolvePromise();
+    };
+
+    stream.once('error', handleError);
+    stream.once('finish', handleFinish);
+    stream.end();
+  });
 }
 
 function defaultLogSink(entry: GatewayLogEntry): void {
@@ -214,6 +337,7 @@ export const GATEWAY_LOG_EVENTS = {
   hook_failure: 'hook.failure',
   cron_claimed: 'cron.claimed',
   cron_dispatched: 'cron.dispatched',
+  cron_completed: 'cron.completed',
   cron_failed: 'cron.failed',
   protocol_error: 'protocol.error',
   health_changed: 'health.changed',

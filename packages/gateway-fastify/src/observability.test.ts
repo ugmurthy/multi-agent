@@ -1,3 +1,7 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -190,6 +194,33 @@ describe('createGatewayLogger', () => {
       warnSpy.mockRestore();
     }
   });
+
+  it('writes structured log entries to a file destination', async () => {
+    const logDir = await mkdtemp(join(tmpdir(), 'gateway-request-logs-'));
+
+    try {
+      const logger = createGatewayLogger({
+        destination: 'file',
+        logDir,
+        now: fixedNow,
+      });
+
+      logger.info('http.request.started', 'HTTP request started', {
+        requestId: 'req-1',
+      });
+      await logger.close();
+
+      const fileContents = await readFile(join(logDir, 'gateway-2026-01-15.log'), 'utf8');
+      const entry = JSON.parse(fileContents.trim()) as GatewayLogEntry;
+
+      expect(entry.level).toBe('info');
+      expect(entry.event).toBe('http.request.started');
+      expect(entry.message).toBe('HTTP request started');
+      expect(entry.data).toEqual({ requestId: 'req-1' });
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('GATEWAY_LOG_EVENTS', () => {
@@ -202,6 +233,7 @@ describe('GATEWAY_LOG_EVENTS', () => {
     expect(GATEWAY_LOG_EVENTS.run_started).toBe('run.started');
     expect(GATEWAY_LOG_EVENTS.hook_failure).toBe('hook.failure');
     expect(GATEWAY_LOG_EVENTS.cron_claimed).toBe('cron.claimed');
+    expect(GATEWAY_LOG_EVENTS.cron_completed).toBe('cron.completed');
     expect(GATEWAY_LOG_EVENTS.protocol_error).toBe('protocol.error');
     expect(GATEWAY_LOG_EVENTS.health_changed).toBe('health.changed');
   });

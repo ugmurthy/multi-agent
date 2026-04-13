@@ -141,6 +141,11 @@ describe('deliverCronResult', () => {
       });
 
       expect(result.delivered).toBe(true);
+      expect(result.payload).toMatchObject({
+        type: 'cron.completed',
+        channelId: 'announcements',
+        output: null,
+      });
     });
 
     it('fails when no channelId is available', async () => {
@@ -193,6 +198,30 @@ describe('deliverCronResult', () => {
         expect(body.type).toBe('cron.completed');
         expect(body.jobId).toBe('job-1');
         expect(body.status).toBe('succeeded');
+        expect(body.output).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('includes cron run output in the completion payload', async () => {
+      const stores = createInMemoryGatewayStores();
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: 'OK' });
+      vi.stubGlobal('fetch', mockFetch);
+
+      try {
+        await deliverCronResult({
+          job: createTestJob({
+            deliveryMode: 'webhook',
+            delivery: { url: 'https://hooks.example.com/cron' },
+          }),
+          cronRun: createTestCronRun({ output: { summary: 'sent' } }),
+          stores,
+          now: fixedNow,
+        });
+
+        const [, calledOptions] = mockFetch.mock.calls[0]!;
+        expect(JSON.parse(calledOptions.body).output).toEqual({ summary: 'sent' });
       } finally {
         vi.unstubAllGlobals();
       }

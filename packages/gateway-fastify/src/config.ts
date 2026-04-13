@@ -23,11 +23,13 @@ export const GATEWAY_HOOK_SLOTS = [
 const INVOCATION_MODES = ['chat', 'run'] as const;
 const CAPTURE_MODES = ['full', 'summary', 'none'] as const;
 const HOOK_FAILURE_POLICIES = ['fail', 'warn', 'ignore'] as const;
+const REQUEST_LOG_DESTINATIONS = ['console', 'file', 'both'] as const;
 const MODEL_PROVIDERS: ModelAdapterConfig['provider'][] = ['openrouter', 'ollama', 'mistral', 'mesh'];
 
 export type InvocationMode = (typeof INVOCATION_MODES)[number];
 export type HookFailurePolicy = (typeof HOOK_FAILURE_POLICIES)[number];
 export type GatewayHookSlot = (typeof GATEWAY_HOOK_SLOTS)[number];
+export type GatewayRequestLoggingDestination = (typeof REQUEST_LOG_DESTINATIONS)[number];
 
 export interface LoadedConfig<TConfig> {
   path: string;
@@ -39,6 +41,8 @@ export interface GatewayServerConfig {
   port: number;
   websocketPath: string;
   healthPath?: string;
+  requestLogging?: boolean;
+  requestLoggingDestination?: GatewayRequestLoggingDestination;
 }
 
 export interface GatewayAuthConfig {
@@ -317,6 +321,11 @@ function parseGatewayServerConfig(value: unknown, path: string, issues: string[]
     port: expectPositiveInteger(server?.port, `${path}.port`, issues) ?? 0,
     websocketPath: expectHttpPath(server?.websocketPath, `${path}.websocketPath`, issues) ?? '/ws',
     healthPath: expectOptionalHttpPath(server?.healthPath, `${path}.healthPath`, issues),
+    requestLogging: expectOptionalBoolean(server?.requestLogging, `${path}.requestLogging`, issues),
+    requestLoggingDestination:
+      server?.requestLoggingDestination === undefined
+        ? undefined
+        : expectEnum(server.requestLoggingDestination, REQUEST_LOG_DESTINATIONS, `${path}.requestLoggingDestination`, issues),
   };
 }
 

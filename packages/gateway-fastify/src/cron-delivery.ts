@@ -11,6 +11,7 @@ export interface CronDeliveryContext {
 export interface CronDeliveryResult {
   delivered: boolean;
   error?: string;
+  payload?: JsonObject;
 }
 
 export async function deliverCronResult(context: CronDeliveryContext): Promise<CronDeliveryResult> {
@@ -62,7 +63,7 @@ async function deliverAnnounce(context: CronDeliveryContext): Promise<CronDelive
     return { delivered: false, error: 'Announce delivery requires delivery.channelId or target.channelId.' };
   }
 
-  return { delivered: true };
+  return { delivered: true, payload: buildAnnouncePayload(context, channelId) };
 }
 
 async function deliverWebhook(context: CronDeliveryContext): Promise<CronDeliveryResult> {
@@ -95,7 +96,7 @@ async function deliverWebhook(context: CronDeliveryContext): Promise<CronDeliver
       };
     }
 
-    return { delivered: true };
+    return { delivered: true, payload };
   } catch (error) {
     return {
       delivered: false,
@@ -115,6 +116,24 @@ function buildWebhookPayload(context: CronDeliveryContext): JsonObject {
     rootRunId: context.cronRun.rootRunId ?? null,
     sessionId: context.cronRun.sessionId ?? null,
     error: context.cronRun.error ?? null,
+    output: context.cronRun.output ?? null,
+    timestamp: context.now().toISOString(),
+  };
+}
+
+function buildAnnouncePayload(context: CronDeliveryContext, channelId: string): JsonObject {
+  return {
+    type: 'cron.completed',
+    channelId,
+    jobId: context.job.id,
+    cronRunId: context.cronRun.id,
+    fireTime: context.cronRun.fireTime,
+    status: context.cronRun.status,
+    runId: context.cronRun.runId ?? null,
+    rootRunId: context.cronRun.rootRunId ?? null,
+    sessionId: context.cronRun.sessionId ?? null,
+    error: context.cronRun.error ?? null,
+    output: context.cronRun.output ?? null,
     timestamp: context.now().toISOString(),
   };
 }
@@ -132,6 +151,7 @@ function buildDeliveryMetadata(context: CronDeliveryContext): JsonObject {
       cronRunId: context.cronRun.id,
       fireTime: context.cronRun.fireTime,
       status: context.cronRun.status,
+      output: context.cronRun.output ?? null,
     },
   };
 }

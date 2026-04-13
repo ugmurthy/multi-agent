@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatCompactAgentEventFrame, parseClarifyCommand, parseEventsCommand, selectInteractiveSession } from './local-ws-client.js';
+import {
+  formatCompactAgentEventFrame,
+  parseClarifyCommand,
+  parseEventsCommand,
+  recordInteractiveSession,
+  selectInteractiveSession,
+} from './local-ws-client.js';
 
 describe('selectInteractiveSession', () => {
   it('keeps chat traffic on the primary session', () => {
@@ -20,6 +26,27 @@ describe('selectInteractiveSession', () => {
     expect(selectInteractiveSession('run', { sessionId: 'chat-1', runSessionId: 'run-1' })).toEqual({
       sessionId: 'run-1',
       shouldOpenSession: false,
+    });
+  });
+});
+
+describe('recordInteractiveSession', () => {
+  it('stores the primary chat session without affecting run session state', () => {
+    const state = {} as { sessionId?: string; runSessionId?: string };
+
+    recordInteractiveSession(state, 'chat', 'chat-1');
+
+    expect(state).toEqual({ sessionId: 'chat-1' });
+  });
+
+  it('stores a dedicated run session without overwriting the chat session', () => {
+    const state = { sessionId: 'chat-1' } as { sessionId?: string; runSessionId?: string };
+
+    recordInteractiveSession(state, 'run', 'run-1');
+
+    expect(state).toEqual({
+      sessionId: 'chat-1',
+      runSessionId: 'run-1',
     });
   });
 });

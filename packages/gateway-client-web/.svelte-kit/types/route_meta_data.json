@@ -1,0 +1,8 @@
+{
+	"/": [
+		"src/routes/+page.server.ts"
+	],
+	"/api/dev-token": [
+		"src/routes/api/dev-token/+server.ts"
+	]
+}

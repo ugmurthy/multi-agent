@@ -45,6 +45,30 @@ describe('authenticateGatewayUpgrade', () => {
     });
   });
 
+  it('accepts a JWT from the websocket query string for browser clients', async () => {
+    const token = await signJwt({ sub: 'user-123', tenantId: 'acme', roles: ['operator'] });
+
+    const result = await authenticateGatewayUpgrade({
+      config: createAuthenticatedConfig(),
+      auth: createResolvedJwtAuth(),
+      headers: {},
+      url: `/ws?channelId=web&access_token=${encodeURIComponent(token)}`,
+    });
+
+    expect(result.isPublicChannel).toBe(false);
+    expect(result.requestedChannelId).toBe('web');
+    expect(result.authContext).toEqual({
+      subject: 'user-123',
+      tenantId: 'acme',
+      roles: ['operator'],
+      claims: expect.objectContaining({
+        sub: 'user-123',
+        tenantId: 'acme',
+        roles: ['operator'],
+      }),
+    });
+  });
+
   it('returns a stable error for an invalid JWT', async () => {
     await expect(
       authenticateGatewayUpgrade({

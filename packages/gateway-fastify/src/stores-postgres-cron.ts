@@ -31,11 +31,12 @@
  *     started_at    TIMESTAMPTZ NOT NULL,
  *     finished_at   TIMESTAMPTZ,
  *     error         TEXT,
+ *     output        JSONB,
  *     metadata      JSONB
  *   );
  */
 
-import type { JsonObject } from './core.js';
+import type { JsonObject, JsonValue } from './core.js';
 import type {
   CronJobStore,
   CronRunStore,
@@ -75,6 +76,7 @@ interface CronRunRow {
   started_at: string;
   finished_at: string | null;
   error: string | null;
+  output: JsonValue | null;
   metadata: JsonObject | null;
 }
 
@@ -122,15 +124,15 @@ export const POSTGRES_CRON_RUN_QUERIES = {
   create: `
     INSERT INTO gateway_cron_runs (
       id, job_id, fire_time, status, session_id, run_id, root_run_id,
-      lease_owner, started_at, finished_at, error, metadata
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      lease_owner, started_at, finished_at, error, output, metadata
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING *
   `,
   get: `SELECT * FROM gateway_cron_runs WHERE id = $1`,
   update: `
     UPDATE gateway_cron_runs SET
       status = $2, session_id = $3, run_id = $4, root_run_id = $5,
-      lease_owner = $6, finished_at = $7, error = $8, metadata = $9
+      lease_owner = $6, finished_at = $7, error = $8, output = $9, metadata = $10
     WHERE id = $1
     RETURNING *
   `,
@@ -211,6 +213,7 @@ function cronRunRowToRecord(row: CronRunRow): GatewayCronRunRecord {
     startedAt: row.started_at,
     finishedAt: row.finished_at ?? undefined,
     error: row.error ?? undefined,
+    output: row.output ?? undefined,
     metadata: row.metadata ?? undefined,
   };
 }
@@ -228,6 +231,7 @@ function cronRunCreateParams(run: GatewayCronRunRecord): unknown[] {
     run.startedAt,
     run.finishedAt ?? null,
     run.error ?? null,
+    run.output ?? null,
     run.metadata ?? null,
   ];
 }
@@ -242,6 +246,7 @@ function cronRunUpdateParams(run: GatewayCronRunRecord): unknown[] {
     run.leaseOwner ?? null,
     run.finishedAt ?? null,
     run.error ?? null,
+    run.output ?? null,
     run.metadata ?? null,
   ];
 }

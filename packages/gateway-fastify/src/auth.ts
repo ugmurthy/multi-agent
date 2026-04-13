@@ -33,6 +33,7 @@ export interface GatewayUpgradeAuthenticationResult {
 
 export interface GatewayUpgradeQuery {
   channelId?: string;
+  access_token?: string;
 }
 
 export class GatewayAuthError extends Error {
@@ -81,7 +82,7 @@ export async function authenticateGatewayUpgrade(
     };
   }
 
-  const token = extractBearerToken(options.headers.authorization);
+  const token = extractGatewayUpgradeToken(options.headers.authorization, options.url);
   if (!token) {
     throw new GatewayAuthError('auth_required', 'A bearer JWT is required for this WebSocket upgrade.', {
       details: requestedChannelId ? { channelId: requestedChannelId } : undefined,
@@ -193,6 +194,25 @@ function getRequestedChannelId(url: string): string | undefined {
 
   const trimmedChannelId = channelId.trim();
   return trimmedChannelId.length > 0 ? trimmedChannelId : undefined;
+}
+
+function extractGatewayUpgradeToken(
+  authorizationHeader: string | string[] | undefined,
+  url: string,
+): string | undefined {
+  return extractBearerToken(authorizationHeader) ?? extractQueryToken(url);
+}
+
+function extractQueryToken(url: string): string | undefined {
+  const parsedUrl = new URL(url, 'ws://gateway.local');
+  const token = parsedUrl.searchParams.get('access_token');
+
+  if (!token) {
+    return undefined;
+  }
+
+  const trimmedToken = token.trim();
+  return trimmedToken.length > 0 ? trimmedToken : undefined;
 }
 
 function isPublicGatewayChannel(config: GatewayConfig, channelId: string): boolean {

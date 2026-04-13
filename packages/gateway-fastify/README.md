@@ -120,7 +120,9 @@ File: `config/gateway.json`
     "host": "0.0.0.0",
     "port": 3000,
     "websocketPath": "/ws",
-    "healthPath": "/health"
+    "healthPath": "/health",
+    "requestLogging": true,
+    "requestLoggingDestination": "both"
   },
   "auth": {
     "provider": "jwt",
@@ -180,6 +182,8 @@ File: `config/gateway.json`
 | `server.port` | Yes | Listen port |
 | `server.websocketPath` | Yes | WebSocket upgrade path (must start with `/`) |
 | `server.healthPath` | No | HTTP health endpoint path |
+| `server.requestLogging` | No | Enable structured HTTP request logs, summarized WebSocket frame logs, and scheduler cron lifecycle logs |
+| `server.requestLoggingDestination` | No | Request log sink: `console`, `file`, or `both`; defaults to `console` when request logging is enabled |
 | `auth.provider` | No | Auth provider name (e.g., `jwt`) |
 | `auth.secret` | No | Shared JWT secret for the built-in `jwt` auth provider |
 | `auth.issuer` | No | Expected JWT issuer |
@@ -194,6 +198,8 @@ File: `config/gateway.json`
 | `bindings[]` | No | Routing bindings (channel, tenant, roles → agentId) |
 | `defaultAgentId` | No | Fallback agent when no binding matches |
 | `hooks` | Yes | Hook slot configuration |
+
+When `server.requestLoggingDestination` is `file` or `both`, the gateway writes newline-delimited JSON logs to `data/gateway/logs/gateway-YYYY-MM-DD.log` relative to the current working directory.
 
 ---
 

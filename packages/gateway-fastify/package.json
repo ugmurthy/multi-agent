@@ -7,6 +7,7 @@
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",
     "client:local": "bun run ./src/local-ws-client.ts",
+    "client:tui": "bun run ./src/local-ws-client-tui.ts",
     "mint:local-jwt": "bun run ./src/mint-local-jwt.ts",
     "start:local": "bun run ./src/start-local.ts",
     "test": "bunx vitest run",
@@ -16,6 +17,8 @@
   "dependencies": {
     "@adaptive-agent/core": "workspace:*",
     "@fastify/websocket": "^11.2.0",
+    "@mariozechner/pi-tui": "^0.66.1",
+    "chalk": "^5.5.0",
     "fastify": "^5.6.1",
     "jose": "^6.2.2"
   },

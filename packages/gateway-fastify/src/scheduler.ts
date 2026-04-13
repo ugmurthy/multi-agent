@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import type { AgentRegistry } from './agent-registry.js';
 import type { GatewayAuthContext } from './auth.js';
+import { deliverCronResult } from './cron-delivery.js';
+import { computeNextCronFireAt } from './cron-schedule.js';
 import type { GatewayConfig } from './config.js';
-import type { JsonObject, RunResult } from './core.js';
+import type { JsonObject, JsonValue, RunResult } from './core.js';
 import { executeGatewayChatTurn } from './chat.js';
+import { GATEWAY_LOG_EVENTS, type GatewayLogger } from './observability.js';
 import { executeGatewayRunStart } from './run.js';
 import type {
   CronTargetKind,
@@ -17,6 +20,7 @@ export interface SchedulerLoopOptions {
   gatewayConfig: GatewayConfig;
   agentRegistry: AgentRegistry;
   stores: GatewayStores;
+  logger?: GatewayLogger;
   leaseOwner?: string;
   leaseDurationMs?: number;
   pollIntervalMs?: number;
@@ -38,9 +42,10 @@ export interface CronDispatchResult {
   rootRunId?: string;
   sessionId?: string;
   error?: string;
+  output?: JsonValue;
 }
 
-const DEFAULT_POLL_INTERVAL_MS = 10_000;
+const DEFAULT_POLL_INTERVAL_MS = 59_000; // every 59 secs.
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 
 export function createSchedulerLoop(options: SchedulerLoopOptions): SchedulerHandle {
@@ -91,6 +96,7 @@ async function executeTick(options: SchedulerLoopOptions): Promise<number> {
         gatewayConfig: options.gatewayConfig,
         agentRegistry: options.agentRegistry,
         stores: options.stores,
+        logger: options.logger,
         leaseOwner,
         leaseExpiresAt,
         now: nowFn,
@@ -101,6 +107,12 @@ async function executeTick(options: SchedulerLoopOptions): Promise<number> {
         dispatched += 1;
       }
     } catch (error) {
+      options.logger?.error(GATEWAY_LOG_EVENTS.cron_failed, 'Cron job failed unexpectedly', {
+        jobId: job.id,
+        fireTime: job.nextFireAt,
+        error: error instanceof Error ? error.message : 'Cron job failed unexpectedly.',
+        failureStage: 'scheduler.tick',
+      });
       options.onError?.(error, job);
     }
   }
@@ -112,6 +124,7 @@ interface DispatchCronJobOptions {
   gatewayConfig: GatewayConfig;
   agentRegistry: AgentRegistry;
   stores: GatewayStores;
+  logger?: GatewayLogger;
   leaseOwner: string;
   leaseExpiresAt: string;
   now: () => Date;
@@ -126,6 +139,7 @@ async function dispatchCronJob(
 
   const existing = await options.stores.cronRuns.findByFireTime(job.id, job.nextFireAt);
   if (existing) {
+    await advanceCronJobSchedule(job, options.stores, options.now);
     return undefined;
   }
 
@@ -139,53 +153,160 @@ async function dispatchCronJob(
   };
 
   await options.stores.cronRuns.create(cronRun);
+  options.logger?.info(GATEWAY_LOG_EVENTS.cron_claimed, 'Cron job claimed', {
+    jobId: job.id,
+    cronRunId: cronRun.id,
+    fireTime: cronRun.fireTime,
+    targetKind: job.targetKind,
+    deliveryMode: job.deliveryMode,
+    leaseOwner: options.leaseOwner,
+    leaseExpiresAt: options.leaseExpiresAt,
+  });
+  options.logger?.info(GATEWAY_LOG_EVENTS.cron_dispatched, 'Cron job dispatched', {
+    jobId: job.id,
+    cronRunId: cronRun.id,
+    fireTime: cronRun.fireTime,
+    targetKind: job.targetKind,
+    deliveryMode: job.deliveryMode,
+  });
+
+  let result: CronTargetResult;
 
   try {
-    const result = await executeCronTarget(job, {
+    result = await executeCronTarget(job, {
       gatewayConfig: options.gatewayConfig,
       agentRegistry: options.agentRegistry,
       stores: options.stores,
       now: options.now,
       idFactory: options.idFactory,
     });
-
-    const finishedAt = options.now().toISOString();
-    await options.stores.cronRuns.update({
-      ...cronRun,
-      status: result.status,
-      runId: result.runId,
-      rootRunId: result.rootRunId,
-      sessionId: result.sessionId,
-      finishedAt,
-      error: result.error,
-    });
-
-    return {
-      cronRunId: cronRun.id,
-      jobId: job.id,
-      status: result.status,
-      runId: result.runId,
-      rootRunId: result.rootRunId,
-      sessionId: result.sessionId,
-      error: result.error,
-    };
   } catch (error) {
-    const finishedAt = options.now().toISOString();
-    const errorMessage = error instanceof Error ? error.message : 'Cron dispatch failed unexpectedly.';
-
-    await options.stores.cronRuns.update({
-      ...cronRun,
+    result = {
       status: 'failed',
-      finishedAt,
-      error: errorMessage,
-    });
-
-    return {
-      cronRunId: cronRun.id,
-      jobId: job.id,
-      status: 'failed',
-      error: errorMessage,
+      error: error instanceof Error ? error.message : 'Cron dispatch failed unexpectedly.',
     };
+  }
+
+  const finishedAt = options.now().toISOString();
+  const completedCronRun = await options.stores.cronRuns.update({
+    ...cronRun,
+    status: result.status,
+    runId: result.runId,
+    rootRunId: result.rootRunId,
+    sessionId: result.sessionId,
+    finishedAt,
+    error: result.error,
+    output: result.output,
+  });
+
+  const deliveryResult = await deliverCronResult({
+    job,
+    cronRun: completedCronRun,
+    stores: options.stores,
+    now: options.now,
+  });
+
+  const finalStatus: CronDispatchResult['status'] =
+    deliveryResult.delivered || completedCronRun.status !== 'succeeded' ? result.status : 'failed';
+  const finalCronRun = deliveryResult.delivered
+    ? completedCronRun
+    : await options.stores.cronRuns.update({
+        ...completedCronRun,
+        status: finalStatus,
+        error: appendCronRunError(completedCronRun.error, deliveryResult.error ?? 'Cron delivery failed.'),
+        metadata: {
+          ...(completedCronRun.metadata ?? {}),
+          delivery: {
+            delivered: false,
+            error: deliveryResult.error ?? 'Cron delivery failed.',
+          },
+        },
+      });
+
+  await advanceCronJobSchedule(job, options.stores, options.now);
+
+  const durationMs = cronDurationMs(cronRun.startedAt, finalCronRun.finishedAt ?? finishedAt);
+  const logData = buildCronLogData(job, finalCronRun, finalStatus, durationMs);
+
+  if (finalStatus === 'failed') {
+    options.logger?.error(GATEWAY_LOG_EVENTS.cron_failed, 'Cron job failed', {
+      ...logData,
+      failureStage: deliveryResult.delivered ? 'dispatch' : 'delivery',
+    });
+  } else {
+    options.logger?.info(GATEWAY_LOG_EVENTS.cron_completed, 'Cron job completed', logData);
+  }
+
+  return {
+    cronRunId: cronRun.id,
+    jobId: job.id,
+    status: finalStatus,
+    runId: finalCronRun.runId,
+    rootRunId: finalCronRun.rootRunId,
+    sessionId: finalCronRun.sessionId,
+    error: finalCronRun.error,
+    output: finalCronRun.output,
+  };
+}
+
+function appendCronRunError(existingError: string | undefined, deliveryError: string): string {
+  if (!existingError) {
+    return deliveryError;
+  }
+
+  return `${existingError} Delivery error: ${deliveryError}`;
+}
+
+function buildCronLogData(
+  job: GatewayCronJobRecord,
+  cronRun: GatewayCronRunRecord,
+  status: CronDispatchResult['status'],
+  durationMs: number,
+): JsonObject {
+  return {
+    jobId: job.id,
+    cronRunId: cronRun.id,
+    fireTime: cronRun.fireTime,
+    status,
+    targetKind: job.targetKind,
+    deliveryMode: job.deliveryMode,
+    startedAt: cronRun.startedAt,
+    durationMs,
+    ...(cronRun.runId ? { runId: cronRun.runId } : {}),
+    ...(cronRun.rootRunId ? { rootRunId: cronRun.rootRunId } : {}),
+    ...(cronRun.sessionId ? { sessionId: cronRun.sessionId } : {}),
+    ...(cronRun.finishedAt ? { finishedAt: cronRun.finishedAt } : {}),
+    ...(cronRun.error ? { error: cronRun.error } : {}),
+  };
+}
+
+function cronDurationMs(startedAt: string, finishedAt: string): number {
+  const durationMs = new Date(finishedAt).getTime() - new Date(startedAt).getTime();
+  return Math.max(0, durationMs);
+}
+
+async function advanceCronJobSchedule(
+  job: GatewayCronJobRecord,
+  stores: GatewayStores,
+  now: () => Date,
+): Promise<GatewayCronJobRecord> {
+  const updatedAt = now().toISOString();
+
+  try {
+    const nextFireAt = computeNextCronFireAt(job.schedule, job.nextFireAt);
+
+    return await stores.cronJobs.update({
+      ...job,
+      enabled: nextFireAt ? job.enabled : false,
+      nextFireAt: nextFireAt?.toISOString() ?? job.nextFireAt,
+      updatedAt,
+    });
+  } catch {
+    return stores.cronJobs.update({
+      ...job,
+      enabled: false,
+      updatedAt,
+    });
   }
 }
 
@@ -203,6 +324,7 @@ interface CronTargetResult {
   rootRunId?: string;
   sessionId?: string;
   error?: string;
+  output?: JsonValue;
 }
 
 export async function executeCronTarget(
@@ -282,6 +404,7 @@ async function executeCronSessionEvent(
       runId: frame.runId,
       rootRunId: frame.rootRunId,
       sessionId: session.id,
+      output: frame.message.content,
     };
   } catch (error) {
     return {
@@ -335,6 +458,7 @@ async function executeCronIsolatedRun(
       runId: frame.runId,
       rootRunId: frame.rootRunId,
       error: frame.status === 'failed' ? frame.error : undefined,
+      output: frame.status === 'succeeded' ? frame.output : undefined,
     };
   } catch (error) {
     return {
@@ -398,6 +522,7 @@ async function executeCronIsolatedChat(
       runId: frame.runId,
       rootRunId: frame.rootRunId,
       sessionId: session.id,
+      output: frame.message.content,
     };
   } catch (error) {
     return {

@@ -10,8 +10,10 @@ import {
 } from './config.js';
 import { AgentRegistry, createAgentRegistry, type AgentFactory } from './agent-registry.js';
 import { createJwtAuthProvider } from './auth.js';
+import { createGatewayLogger } from './observability.js';
 import { createGatewayServer } from './server.js';
 import { createModuleRegistry, ModuleRegistry, type ResolvedGatewayModules } from './registries.js';
+import { createSchedulerLoop, type SchedulerHandle, type SchedulerLoopOptions } from './scheduler.js';
 import { createInMemoryGatewayStores, type GatewayStores } from './stores.js';
 
 export interface BootstrapGatewayOptions {
@@ -22,6 +24,7 @@ export interface BootstrapGatewayOptions {
   agentFactory?: AgentFactory;
   fastify?: FastifyServerOptions;
   stores?: GatewayStores;
+  scheduler?: Pick<SchedulerLoopOptions, 'idFactory' | 'leaseOwner' | 'now' | 'onError' | 'pollIntervalMs'>;
 }
 
 export interface BootstrappedGateway {
@@ -32,6 +35,7 @@ export interface BootstrappedGateway {
   agentRegistry: AgentRegistry;
   gatewayModules: ResolvedGatewayModules;
   stores: GatewayStores;
+  scheduler?: SchedulerHandle;
 }
 
 export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): Promise<BootstrappedGateway> {
@@ -56,6 +60,11 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
     agentFactory: options.agentFactory,
   });
   const stores = options.stores ?? createInMemoryGatewayStores();
+  const requestLogger = loadedGatewayConfig.config.server.requestLogging
+    ? createGatewayLogger({
+        destination: loadedGatewayConfig.config.server.requestLoggingDestination,
+      })
+    : undefined;
 
   validateRoutingReferences(loadedGatewayConfig.config, agentRegistry, loadedGatewayConfig.path);
 
@@ -64,6 +73,48 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
     auth: gatewayModules.auth,
     agentRegistry,
     stores,
+    requestLogger,
+  });
+  let scheduler: SchedulerHandle | undefined;
+  let startScheduler: (() => void) | undefined;
+
+  if (loadedGatewayConfig.config.cron?.enabled) {
+    startScheduler = () => {
+      if (scheduler) {
+        return;
+      }
+
+      scheduler = createSchedulerLoop({
+        gatewayConfig: loadedGatewayConfig.config,
+        agentRegistry,
+        stores,
+        logger: requestLogger,
+        leaseDurationMs:
+          loadedGatewayConfig.config.cron && loadedGatewayConfig.config.cron.schedulerLeaseMs > 0
+            ? loadedGatewayConfig.config.cron.schedulerLeaseMs
+            : undefined,
+        leaseOwner: options.scheduler?.leaseOwner,
+        now: options.scheduler?.now,
+        idFactory: options.scheduler?.idFactory,
+        onError: options.scheduler?.onError,
+        pollIntervalMs: options.scheduler?.pollIntervalMs,
+      });
+
+      void scheduler.tick().catch(() => {
+        // Startup should not fail just because an initial cron poll had a transient error.
+      });
+    };
+
+    app.server.on('listening', startScheduler);
+  }
+
+  app.addHook('onClose', async () => {
+    scheduler?.stop();
+    scheduler = undefined;
+    if (startScheduler) {
+      app.server.off('listening', startScheduler);
+    }
+    await requestLogger?.close();
   });
 
   return {
@@ -74,6 +125,9 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
     agentRegistry,
     gatewayModules,
     stores,
+    get scheduler() {
+      return scheduler;
+    },
   };
 }
 

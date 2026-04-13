@@ -1,6 +1,6 @@
 import type { InvocationMode } from './config.js';
 import type { SessionStatus } from './protocol.js';
-import type { JsonObject } from './core.js';
+import type { JsonObject, JsonValue } from './core.js';
 
 export type GatewayInvocationKind = 'chat' | 'run' | 'approval' | 'system';
 export type TranscriptMessageRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -74,6 +74,7 @@ export interface GatewayCronRunRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  output?: JsonValue;
   metadata?: JsonObject;
 }
 

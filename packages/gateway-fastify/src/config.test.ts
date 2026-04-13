@@ -36,6 +36,8 @@ describe('gateway config loading', () => {
             port: 3000,
             websocketPath: '/ws',
             healthPath: '/health',
+            requestLogging: true,
+            requestLoggingDestination: 'file',
           },
           auth: {
             provider: 'jwt',
@@ -116,6 +118,8 @@ describe('gateway config loading', () => {
       summaryMaxMessages: 8,
       summaryLineMaxLength: 120,
     });
+    expect(loadedGatewayConfig.config.server.requestLogging).toBe(true);
+    expect(loadedGatewayConfig.config.server.requestLoggingDestination).toBe('file');
     expect(loadedGatewayConfig.config.hooks.onAuthenticate).toEqual(['audit']);
     expect(loadedAgentConfigs).toHaveLength(1);
     expect(loadedAgentConfigs[0]?.config).toMatchObject({

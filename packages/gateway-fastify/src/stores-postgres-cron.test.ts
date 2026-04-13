@@ -54,6 +54,7 @@ const sampleRunRow = {
   started_at: '2026-04-08T10:00:01.000Z',
   finished_at: null,
   error: null,
+  output: null,
   metadata: null,
 };
 
@@ -304,6 +305,7 @@ describe('PostgresCronRunStore', () => {
     expect(result!.sessionId).toBeUndefined();
     expect(result!.finishedAt).toBeUndefined();
     expect(result!.error).toBeUndefined();
+    expect(result!.output).toBeUndefined();
     expect(result!.metadata).toBeUndefined();
   });
 });

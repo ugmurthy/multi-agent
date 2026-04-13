@@ -46,6 +46,7 @@ async function main(): Promise<void> {
   console.log(`- Agent config dir: ${AGENT_CONFIG_DIR}`);
   console.log(`- Default agent config: ${DEFAULT_AGENT_CONFIG_PATH} (${defaultAgentStatus})`);
   console.log(`- File-backed gateway stores: ${GATEWAY_STORE_BASE_DIR}`);
+  console.log(`- Cron: ${gateway.gatewayConfig.cron?.enabled ? 'enabled' : 'disabled'}`);
   console.log(
     `- Auth: jwt (${process.env.GATEWAY_JWT_SECRET ? 'secret from GATEWAY_JWT_SECRET' : 'using local dev default; set GATEWAY_JWT_SECRET to override'})`,
   );
@@ -156,6 +157,7 @@ function createGatewayConfig(gatewayJwtSecret: string): Record<string, unknown> 
       port: 8959,
       websocketPath: '/ws',
       healthPath: '/health',
+      requestLogging: true,
     },
     auth: {
       provider: 'jwt',

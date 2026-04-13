@@ -227,7 +227,7 @@ async function main(): Promise<void> {
   });
 
   const openedSession = await sessionOpened.promise;
-  state.sessionId = openedSession.sessionId;
+  recordInteractiveSession(state, 'chat', openedSession.sessionId);
 
   async function openAdditionalSession(): Promise<SessionOpenedFrame> {
     if (pendingSessionOpen) {
@@ -254,7 +254,7 @@ async function main(): Promise<void> {
     }
 
     const runSession = await openAdditionalSession();
-    state.runSessionId = runSession.sessionId;
+    recordInteractiveSession(state, 'run', runSession.sessionId);
     console.log(`Run session ready: ${runSession.sessionId}`);
     return runSession.sessionId;
   }
@@ -364,7 +364,7 @@ async function main(): Promise<void> {
         const clarificationSessionId = state.clarificationSessionIds.get(runId);
         if (!clarificationSessionId) {
           throw new Error(
-            `No sessionId is tracked for run "${runId}". Wait for a clarification request from this client first.`,
+            `No sessionId is tracked for run "${runId}". /clarify expects the runId from a formal clarification request, not a sessionId or rootRunId. Wait for a clarification request from this client first.`,
           );
         }
         sendFrame(socket, {
@@ -528,9 +528,27 @@ export interface InteractiveSessionSelection {
   shouldOpenSession: boolean;
 }
 
+export interface InteractiveSessionState {
+  sessionId?: string;
+  runSessionId?: string;
+}
+
+export function recordInteractiveSession(
+  state: InteractiveSessionState,
+  mode: 'chat' | 'run',
+  sessionId: string,
+): void {
+  if (mode === 'run') {
+    state.runSessionId = sessionId;
+    return;
+  }
+
+  state.sessionId = sessionId;
+}
+
 export function selectInteractiveSession(
   mode: 'chat' | 'run',
-  state: Pick<ClientState, 'sessionId' | 'runSessionId'>,
+  state: Pick<InteractiveSessionState, 'sessionId' | 'runSessionId'>,
 ): InteractiveSessionSelection {
   if (mode === 'run') {
     if (state.runSessionId) {

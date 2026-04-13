@@ -66,6 +66,107 @@ describe('createGatewayServer', () => {
     });
   });
 
+  it('logs HTTP requests when request logging is enabled', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const app = await createGatewayServer({
+        ...baseConfig,
+        server: {
+          ...baseConfig.server,
+          requestLogging: true,
+        },
+      });
+      apps.push(app);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/health',
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const logEntries = consoleSpy.mock.calls
+        .map((call) => call[0])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => JSON.parse(value));
+
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'http.request.started',
+          message: 'HTTP request started',
+          data: expect.objectContaining({
+            method: 'GET',
+            url: '/health',
+          }),
+        }),
+      );
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'http.request.completed',
+          message: 'HTTP request completed',
+          data: expect.objectContaining({
+            method: 'GET',
+            url: '/health',
+            statusCode: 200,
+          }),
+        }),
+      );
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('redacts websocket query tokens from request logs', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const app = await createGatewayServer({
+        ...baseConfig,
+        server: {
+          ...baseConfig.server,
+          requestLogging: true,
+        },
+      });
+      apps.push(app);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/health?access_token=super-secret-token&channelId=web',
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const logEntries = consoleSpy.mock.calls
+        .map((call) => call[0])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => JSON.parse(value));
+
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'http.request.started',
+          data: expect.objectContaining({
+            url: '/health?access_token=%5BREDACTED%5D&channelId=web',
+          }),
+        }),
+      );
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'http.request.completed',
+          data: expect.objectContaining({
+            url: '/health?access_token=%5BREDACTED%5D&channelId=web',
+          }),
+        }),
+      );
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
   it('starts listening on the configured host and an ephemeral port', async () => {
     const app = await createGatewayServer(baseConfig);
     apps.push(app);
@@ -73,6 +174,60 @@ describe('createGatewayServer', () => {
 
     expect(app.server.listening).toBe(true);
     expect(getListeningPort(app)).toBeGreaterThan(0);
+  });
+
+  it('logs inbound and outbound WebSocket frames when request logging is enabled', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let socket: WebSocket | undefined;
+
+    try {
+      const app = await createGatewayServer({
+        ...baseConfig,
+        server: {
+          ...baseConfig.server,
+          requestLogging: true,
+        },
+      });
+      apps.push(app);
+      await app.listen({ host: '127.0.0.1', port: 0 });
+
+      socket = await openTestWebSocket(`ws://127.0.0.1:${getListeningPort(app)}/ws`);
+      socket.send(JSON.stringify({ type: 'ping', id: 'heartbeat-1' }));
+
+      expect(await waitForSocketMessage(socket)).toBe(JSON.stringify({ type: 'pong', id: 'heartbeat-1' }));
+
+      const logEntries = consoleSpy.mock.calls
+        .map((call) => call[0])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => JSON.parse(value));
+
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'ws.frame.received',
+          message: 'WebSocket frame received',
+          data: expect.objectContaining({
+            frameType: 'ping',
+            pingId: 'heartbeat-1',
+          }),
+        }),
+      );
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'ws.frame.sent',
+          message: 'WebSocket frame sent',
+          data: expect.objectContaining({
+            frameType: 'pong',
+            pingId: 'heartbeat-1',
+            source: 'response',
+          }),
+        }),
+      );
+    } finally {
+      socket?.close();
+      consoleSpy.mockRestore();
+    }
   });
 
   it('routes websocket messages through the validated protocol handler', async () => {
@@ -1541,4 +1696,52 @@ function getListeningPort(app: Awaited<ReturnType<typeof createGatewayServer>>):
   }
 
   return address.port;
+}
+
+async function openTestWebSocket(url: string): Promise<WebSocket> {
+  const socket = new WebSocket(url);
+
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      socket.removeEventListener('open', handleOpen);
+      socket.removeEventListener('error', handleError);
+    };
+
+    const handleOpen = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleError = (event: Event) => {
+      cleanup();
+      reject(new Error(`WebSocket connection failed: ${String(event.type)}`));
+    };
+
+    socket.addEventListener('open', handleOpen, { once: true });
+    socket.addEventListener('error', handleError, { once: true });
+  });
+
+  return socket;
+}
+
+async function waitForSocketMessage(socket: WebSocket): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const cleanup = () => {
+      socket.removeEventListener('message', handleMessage);
+      socket.removeEventListener('error', handleError);
+    };
+
+    const handleMessage = (event: MessageEvent) => {
+      cleanup();
+      resolve(String(event.data));
+    };
+
+    const handleError = (event: Event) => {
+      cleanup();
+      reject(new Error(`WebSocket error while waiting for message: ${String(event.type)}`));
+    };
+
+    socket.addEventListener('message', handleMessage, { once: true });
+    socket.addEventListener('error', handleError, { once: true });
+  });
 }
