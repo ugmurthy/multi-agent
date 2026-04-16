@@ -43,7 +43,7 @@
  *   );
  */
 
-import type { JsonObject } from './core.js';
+import type { JsonObject, JsonValue } from './core.js';
 import type { InvocationMode } from './config.js';
 import type { SessionStatus } from './protocol.js';
 import type {
@@ -193,7 +193,7 @@ function sessionRecordToParams(session: GatewaySessionRecord): unknown[] {
     session.lastCompletedRootRunId ?? null,
     session.transcriptVersion,
     session.transcriptSummary ?? null,
-    session.metadata ?? null,
+    jsonbParam(session.metadata),
     session.createdAt,
     session.updatedAt,
   ];
@@ -213,7 +213,7 @@ function sessionUpdateParams(session: GatewaySessionRecord): unknown[] {
     session.lastCompletedRootRunId ?? null,
     session.transcriptVersion,
     session.transcriptSummary ?? null,
-    session.metadata ?? null,
+    jsonbParam(session.metadata),
     session.updatedAt,
   ];
 }
@@ -237,7 +237,7 @@ function transcriptRecordToParams(message: TranscriptMessageRecord): unknown[] {
     message.sequence,
     message.role,
     message.content,
-    message.metadata ?? null,
+    jsonbParam(message.metadata),
     message.createdAt,
   ];
 }
@@ -261,9 +261,13 @@ function linkRecordToParams(link: SessionRunLinkRecord): unknown[] {
     link.rootRunId,
     link.invocationKind,
     link.turnIndex ?? null,
-    link.metadata ?? null,
+    jsonbParam(link.metadata),
     link.createdAt,
   ];
+}
+
+function jsonbParam(value: JsonValue | undefined | null): string | null {
+  return value === undefined || value === null ? null : JSON.stringify(value);
 }
 
 export class PostgresSessionStore implements SessionStore {

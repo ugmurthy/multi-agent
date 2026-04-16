@@ -104,6 +104,7 @@ const sampleEventRow = {
   plan_execution_id: null,
   seq: '7',
   step_id: 'step-1',
+  tool_call_id: 'call-1',
   event_type: 'tool.completed',
   schema_version: 1,
   payload: { toolName: 'lookup' },
@@ -184,6 +185,8 @@ const sampleToolExecutionRow = {
   idempotency_key: 'run-1:step-1:call-1',
   status: 'completed',
   input_hash: '{"topic":"resumability"}',
+  input: { topic: 'resumability' },
+  child_run_id: 'child-run-1',
   output: { finding: 'cached' },
   error_code: null,
   error_message: null,
@@ -248,6 +251,19 @@ describe('PostgresRunStore', () => {
     );
   });
 
+  it('encodes scalar JSON results before writing jsonb columns', async () => {
+    const client = createQueuedClient([[sampleRunRow], [{ ...completedRunRow, result: 'Hello Ganesh.' }]]);
+    const store = new PostgresRunStore(client);
+
+    const run = await store.updateRun('run-1', { status: 'succeeded', result: 'Hello Ganesh.' }, 3);
+
+    expect(run.result).toBe('Hello Ganesh.');
+    expect(client.query).toHaveBeenLastCalledWith(
+      POSTGRES_RUNTIME_RUN_QUERIES.update,
+      expect.arrayContaining([JSON.stringify('Hello Ganesh.')]),
+    );
+  });
+
   it('throws an optimistic concurrency error before update when expected version differs', async () => {
     const client = createMockClientWithRows([sampleRunRow]);
     const store = new PostgresRunStore(client);
@@ -299,6 +315,7 @@ describe('PostgresEventStore', () => {
     const event = await store.append({
       runId: 'run-1',
       stepId: 'step-1',
+      toolCallId: 'call-1',
       type: 'tool.completed',
       schemaVersion: 1,
       payload: { toolName: 'lookup' },
@@ -309,12 +326,13 @@ describe('PostgresEventStore', () => {
       runId: 'run-1',
       seq: 7,
       type: 'tool.completed',
+      toolCallId: 'call-1',
       payload: { toolName: 'lookup' },
     });
     expect(listener).toHaveBeenCalledWith(event);
     expect(client.query).toHaveBeenCalledWith(
       POSTGRES_RUNTIME_EVENT_QUERIES.append,
-      ['run-1', null, 'step-1', 'tool.completed', 1, { toolName: 'lookup' }],
+      ['run-1', null, 'step-1', 'call-1', 'tool.completed', 1, '{"toolName":"lookup"}'],
     );
   });
 
@@ -359,8 +377,8 @@ describe('PostgresSnapshotStore', () => {
         'step-1',
         null,
         null,
-        { status: 'running' },
-        { schemaVersion: 1, messages: [], stepsUsed: 1 },
+        '{"status":"running"}',
+        '{"schemaVersion":1,"messages":[],"stepsUsed":1}',
       ],
     );
   });
@@ -497,6 +515,8 @@ describe('PostgresToolExecutionStore', () => {
       toolCallId: 'call-1',
       toolName: 'lookup',
       status: 'completed',
+      input: { topic: 'resumability' },
+      childRunId: 'child-run-1',
       output: { finding: 'cached' },
     });
     expect(client.query).toHaveBeenCalledWith(POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES.getByIdempotencyKey, [
@@ -516,12 +536,34 @@ describe('PostgresToolExecutionStore', () => {
       toolName: 'lookup',
       idempotencyKey: 'run-1:step-1:call-1',
       inputHash: '{"topic":"resumability"}',
+      input: { topic: 'resumability' },
     });
 
     expect(record.status).toBe('started');
+    expect(record.input).toEqual({ topic: 'resumability' });
     expect(client.query).toHaveBeenCalledWith(
       POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES.markStarted,
-      expect.arrayContaining(['run-1', 'step-1', 'call-1', 'lookup', 'run-1:step-1:call-1']),
+      expect.arrayContaining([
+        'run-1',
+        'step-1',
+        'call-1',
+        'lookup',
+        'run-1:step-1:call-1',
+        '{"topic":"resumability"}',
+      ]),
+    );
+  });
+
+  it('links a delegate tool execution to its child run', async () => {
+    const client = createMockClientWithRows([sampleToolExecutionRow]);
+    const store = new PostgresToolExecutionStore(client);
+
+    const record = await store.markChildRunLinked('run-1:step-1:call-1', 'child-run-1');
+
+    expect(record.childRunId).toBe('child-run-1');
+    expect(client.query).toHaveBeenCalledWith(
+      POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES.markChildRunLinked,
+      ['run-1:step-1:call-1', 'child-run-1'],
     );
   });
 
@@ -535,7 +577,7 @@ describe('PostgresToolExecutionStore', () => {
     expect(record.output).toEqual({ finding: 'cached' });
     expect(client.query).toHaveBeenCalledWith(
       POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES.markCompleted,
-      expect.arrayContaining(['run-1:step-1:call-1', { finding: 'cached' }]),
+      expect.arrayContaining(['run-1:step-1:call-1', '{"finding":"cached"}']),
     );
   });
 });

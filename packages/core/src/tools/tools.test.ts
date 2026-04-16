@@ -17,6 +17,7 @@ function stubToolContext(overrides?: Partial<ToolContext>): ToolContext {
     rootRunId: 'run-1',
     delegationDepth: 0,
     stepId: 'step-1',
+    toolCallId: 'call-1',
     idempotencyKey: 'run-1:step-1:call-1',
     signal: new AbortController().signal,
     emit: vi.fn().mockResolvedValue(undefined),

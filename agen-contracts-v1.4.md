@@ -362,6 +362,7 @@ export interface AgentEvent {
   seq: number;
   type: EventType;
   stepId?: string;
+  toolCallId?: string;
   schemaVersion: number;
   payload: JsonValue;
   createdAt: string;
@@ -649,6 +650,7 @@ create table agent_events (
   plan_execution_id uuid references plan_executions(id) on delete set null,
   seq bigint not null,
   step_id text,
+  tool_call_id text,
   event_type text not null,
   schema_version integer not null default 1,
   payload jsonb not null default '{}'::jsonb,
@@ -659,6 +661,7 @@ create table agent_events (
 create index agent_events_run_idx on agent_events (run_id, seq);
 create index agent_events_type_idx on agent_events (event_type, created_at desc);
 create index agent_events_plan_execution_idx on agent_events (plan_execution_id, seq);
+create index agent_events_run_tool_call_idx on agent_events (run_id, tool_call_id, seq);
 
 create table run_snapshots (
   id uuid primary key default gen_random_uuid(),
@@ -675,6 +678,29 @@ create table run_snapshots (
 );
 
 create index run_snapshots_run_idx on run_snapshots (run_id, snapshot_seq desc);
+
+create table tool_executions (
+  run_id uuid not null references agent_runs(id) on delete cascade,
+  step_id text not null,
+  tool_call_id text not null,
+  tool_name text not null,
+  idempotency_key text not null,
+  status text not null,
+  input_hash text not null,
+  input jsonb,
+  child_run_id uuid references agent_runs(id) on delete set null,
+  output jsonb,
+  error_code text,
+  error_message text,
+  started_at timestamptz not null default now(),
+  completed_at timestamptz,
+  primary key (run_id, step_id, tool_call_id),
+  unique (idempotency_key)
+);
+
+create index tool_executions_run_idx on tool_executions (run_id, started_at desc);
+create index tool_executions_status_idx on tool_executions (status, started_at asc);
+create index tool_executions_child_run_idx on tool_executions (child_run_id);
 ```
 
 ## 4. Schema Notes
@@ -691,6 +717,7 @@ create index run_snapshots_run_idx on run_snapshots (run_id, snapshot_seq desc);
 
 - append-only log for replay, UI timelines, and audit
 - ordered by `seq` within each run
+- `tool_call_id` links tool lifecycle events to the durable tool execution ledger when present
 - payload can store summaries instead of raw prompt content when capture policy requires it
 - delegation linkage can live in payload and be joined through `agent_runs`
 
@@ -707,6 +734,13 @@ create index run_snapshots_run_idx on run_snapshots (run_id, snapshot_seq desc);
 - versioning is per plan row using `version` and optional `parent_plan_id`
 - `toolset_hash` is used for compatibility checks at execution time
 - persisted plans remain tool-only and must not contain `delegate.*` steps
+
+### `tool_executions`
+
+- durable tool execution ledger keyed by `idempotency_key`
+- stores exact start/end timestamps for execution forensics
+- stores raw `input` when capture policy allows so traces do not need to reconstruct from event payloads
+- `child_run_id` links parent `delegate.*` executions to the spawned child run when delegation occurs
 
 ### `plan_executions`
 

@@ -71,6 +71,7 @@ interface ExecutionState {
 
 interface RunContinuationOptions {
   outputSchema?: JsonSchema;
+  retryFailedMaxStepsChild?: boolean;
 }
 
 const DEFAULT_AGENT_DEFAULTS = {
@@ -134,6 +135,7 @@ export class AdaptiveAgent {
       downstreamEventSink: options.eventSink,
       logger: this.logger,
       snapshotStore: options.snapshotStore,
+      toolExecutionStore: options.toolExecutionStore,
       transactionStore: options.transactionStore,
       executeChildRun: (request) => this.executeChildRun(request),
     });
@@ -359,13 +361,15 @@ export class AdaptiveAgent {
             currentStepId: step.id,
             currentStepIndex: index,
           });
+          const approvalInput = resolvePlanTemplate(step.inputTemplate, request.input, request.context, resolvedStepOutputs);
+          const eventInput = captureToolInputForLog(tool, approvalInput, this.defaultCaptureMode);
 
           this.logLifecycle('warn', 'approval.requested', {
             ...runLogBindings(currentRun),
             planExecutionId: currentExecution.id,
             stepId: step.id,
             toolName: tool.name,
-            input: captureToolInputForLog(tool, resolvePlanTemplate(step.inputTemplate, request.input, request.context, resolvedStepOutputs), this.defaultCaptureMode),
+            input: eventInput,
           });
 
           await this.emit({
@@ -378,6 +382,7 @@ export class AdaptiveAgent {
               toolName: tool.name,
               planId: plan.id,
               planExecutionId: currentExecution.id,
+              ...(eventInput === undefined ? {} : { input: eventInput }),
             },
           });
 
@@ -390,7 +395,9 @@ export class AdaptiveAgent {
         }
 
         const input = resolvePlanTemplate(step.inputTemplate, request.input, request.context, resolvedStepOutputs);
-        const toolContext = this.createToolContext(currentRun, step.id, `plan:${currentExecution.id}:${step.id}`);
+        const eventInput = captureToolInputForLog(tool, input, this.defaultCaptureMode);
+        const toolCallId = `plan:${currentExecution.id}:${step.id}`;
+        const toolContext = this.createToolContext(currentRun, step.id, toolCallId);
         const toolStartedAt = Date.now();
         let recoveredToolFailure = false;
 
@@ -404,12 +411,14 @@ export class AdaptiveAgent {
           runId: currentRun.id,
           planExecutionId: currentExecution.id,
           stepId: step.id,
+          toolCallId,
           type: 'tool.started',
           schemaVersion: 1,
           payload: {
             toolName: tool.name,
             planId: plan.id,
             planExecutionId: currentExecution.id,
+            ...(eventInput === undefined ? {} : { input: eventInput }),
           },
         });
 
@@ -430,22 +439,25 @@ export class AdaptiveAgent {
                 ? undefined
                 : captureToolOutputForLog(tool, recoveredOutput, this.defaultCaptureMode),
           });
+          const recoveredEventOutput =
+            recoveredOutput === undefined
+              ? undefined
+              : tool.summarizeResult
+                ? tool.summarizeResult(recoveredOutput)
+                : recoveredOutput;
           await this.emit({
             runId: currentRun.id,
             planExecutionId: currentExecution.id,
             stepId: step.id,
+            toolCallId,
             type: 'tool.failed',
             schemaVersion: 1,
             payload: {
               toolName: tool.name,
+              ...(eventInput === undefined ? {} : { input: eventInput }),
               error: message,
               recoverable: recoveredOutput !== undefined,
-              output:
-                recoveredOutput === undefined
-                  ? undefined
-                  : tool.summarizeResult
-                    ? tool.summarizeResult(recoveredOutput)
-                    : recoveredOutput,
+              ...(recoveredEventOutput === undefined ? {} : { output: recoveredEventOutput }),
             },
           });
 
@@ -491,10 +503,12 @@ export class AdaptiveAgent {
             runId: currentRun.id,
             planExecutionId: currentExecution.id,
             stepId: step.id,
+            toolCallId,
             type: 'tool.completed',
             schemaVersion: 1,
             payload: {
               toolName: tool.name,
+              ...(eventInput === undefined ? {} : { input: eventInput }),
               output: tool.summarizeResult ? tool.summarizeResult(lastOutput) : lastOutput,
             },
           });
@@ -743,7 +757,10 @@ export class AdaptiveAgent {
         });
       }
 
-      return await this.runWithExistingRun(runId, { outputSchema: state.outputSchema });
+      return await this.runWithExistingRun(runId, {
+        outputSchema: state.outputSchema,
+        retryFailedMaxStepsChild: true,
+      });
     } finally {
       await this.releaseLeaseQuietly(run.id);
     }
@@ -819,7 +836,7 @@ export class AdaptiveAgent {
       });
       await this.saveExecutionSnapshot(retryingRun, state, retryingRun.status);
 
-      return await this.runWithExistingRun(runId, { outputSchema: state.outputSchema });
+      return await this.executionLoop(await this.refreshRun(runId), state);
     } finally {
       await this.releaseLeaseQuietly(run.id);
     }
@@ -846,7 +863,7 @@ export class AdaptiveAgent {
     try {
       if (shouldResolveWaitingDelegateSnapshot(state)) {
         try {
-          currentRun = await this.resumeAwaitingParent(currentRun, state);
+          currentRun = await this.resumeAwaitingParent(currentRun, state, options.retryFailedMaxStepsChild ?? false);
         } catch (error) {
           if (error instanceof DelegationError) {
             return this.failRun(currentRun, state, error.message, error.code);
@@ -1052,6 +1069,18 @@ export class AdaptiveAgent {
     state: ExecutionState,
   ): { retryable: true; failureKind: FailureKind } | { retryable: false; reason: string; failureKind: FailureKind } {
     const failureKind = classifyFailureKind(run.errorCode as RunFailureCode | undefined, run.errorMessage);
+    if (run.errorCode === 'MAX_STEPS') {
+      if (this.defaults.maxSteps > state.stepsUsed) {
+        return { retryable: true, failureKind };
+      }
+
+      return {
+        retryable: false,
+        failureKind,
+        reason: `Run ${run.id} exhausted ${state.stepsUsed} steps; increase maxSteps above ${state.stepsUsed} before retrying`,
+      };
+    }
+
     const retryAttempts = readRetryAttempts(run.metadata);
     if (retryAttempts >= DEFAULT_TERMINAL_RETRY_LIMIT) {
       return {
@@ -1130,11 +1159,12 @@ export class AdaptiveAgent {
 
     if (tool.requiresApproval && !this.options.defaults?.autoApproveAll && !state.approvedToolCallIds.includes(pendingToolCall.id)) {
       const awaitingApprovalRun = await this.transitionRun(run, 'awaiting_approval');
+      const eventInput = captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode);
       this.logLifecycle('warn', 'approval.requested', {
         ...runLogBindings(awaitingApprovalRun),
         stepId: pendingToolCall.stepId,
         toolName: tool.name,
-        input: captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode),
+        input: eventInput,
       });
       await this.emit({
         runId: run.id,
@@ -1143,6 +1173,7 @@ export class AdaptiveAgent {
         schemaVersion: 1,
         payload: {
           toolName: tool.name,
+          ...(eventInput === undefined ? {} : { input: eventInput }),
         },
       });
 
@@ -1173,20 +1204,24 @@ export class AdaptiveAgent {
       toolName: tool.name,
       idempotencyKey: toolContext.idempotencyKey,
       inputHash: stableJsonFingerprint(pendingToolCall.input),
+      input: pendingToolCall.input,
     });
 
     const emitsToolLifecycle = tool.name.startsWith(RESERVED_DELEGATE_PREFIX);
     const toolStartedAt = Date.now();
 
     if (!emitsToolLifecycle) {
+      const eventInput = captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode);
       this.logToolStarted(run, pendingToolCall.stepId, tool, pendingToolCall.input);
       await this.emit({
         runId: run.id,
         stepId: pendingToolCall.stepId,
+        toolCallId: pendingToolCall.id,
         type: 'tool.started',
         schemaVersion: 1,
         payload: {
           toolName: tool.name,
+          ...(eventInput === undefined ? {} : { input: eventInput }),
         },
       });
     }
@@ -1209,6 +1244,13 @@ export class AdaptiveAgent {
         );
       }
 
+      const eventInput = captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode);
+      const completionPayload: JsonObject = {
+        toolName: tool.name,
+        ...(eventInput === undefined ? {} : { input: eventInput }),
+        output: tool.summarizeResult ? tool.summarizeResult(output) : output,
+      };
+
       return {
         output,
         completion: {
@@ -1219,12 +1261,10 @@ export class AdaptiveAgent {
             : {
                 runId: run.id,
                 stepId: pendingToolCall.stepId,
+                toolCallId: pendingToolCall.id,
                 type: 'tool.completed',
                 schemaVersion: 1,
-                payload: {
-                  toolName: tool.name,
-                  output: tool.summarizeResult ? tool.summarizeResult(output) : output,
-                },
+                payload: completionPayload,
               },
         },
       };
@@ -1252,21 +1292,25 @@ export class AdaptiveAgent {
                 : captureToolOutputForLog(tool, recoveredOutput, this.defaultCaptureMode),
           },
         );
+        const eventInput = captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode);
+        const recoveredEventOutput =
+          recoveredOutput === undefined
+            ? undefined
+            : tool.summarizeResult
+              ? tool.summarizeResult(recoveredOutput)
+              : recoveredOutput;
         toolFailedEvent = {
           runId: run.id,
           stepId: pendingToolCall.stepId,
+          toolCallId: pendingToolCall.id,
           type: 'tool.failed',
           schemaVersion: 1,
           payload: {
             toolName: tool.name,
+            ...(eventInput === undefined ? {} : { input: eventInput }),
             error: error instanceof Error ? error.message : String(error),
             recoverable: recoveredOutput !== undefined,
-            output:
-              recoveredOutput === undefined
-                ? undefined
-                : tool.summarizeResult
-                  ? tool.summarizeResult(recoveredOutput)
-                  : recoveredOutput,
+            ...(recoveredEventOutput === undefined ? {} : { output: recoveredEventOutput }),
           },
         };
       }
@@ -1302,13 +1346,20 @@ export class AdaptiveAgent {
     return childAgent.runWithExistingRun(request.runId, { outputSchema: request.outputSchema });
   }
 
-  private async resumeAwaitingParent(run: AgentRun, state: ExecutionState): Promise<AgentRun> {
+  private async resumeAwaitingParent(
+    run: AgentRun,
+    state: ExecutionState,
+    retryFailedMaxStepsChild: boolean,
+  ): Promise<AgentRun> {
     const childRunId = run.currentChildRunId ?? extractWaitingChildRunId(state);
     if (childRunId) {
       const childRun = await this.options.runStore.getRun(childRunId);
       if (childRun && !TERMINAL_RUN_STATUSES.has(childRun.status)) {
         const childAgent = this.createAgentForChildRun(childRun);
         await childAgent.resume(childRun.id);
+      } else if (childRun && retryFailedMaxStepsChild && childRun.status === 'failed' && childRun.errorCode === 'MAX_STEPS') {
+        const childAgent = this.createAgentForChildRun(childRun);
+        await childAgent.retry(childRun.id);
       }
     }
 
@@ -1361,6 +1412,7 @@ export class AdaptiveAgent {
     const recursiveDelegates = this.options.delegation?.allowRecursiveDelegation ? this.options.delegates : [];
     const hostTools = this.pickHostTools(delegate.allowedTools);
     const tools = delegate.handlerTools ? [...hostTools, ...delegate.handlerTools] : hostTools;
+    const defaults = mergeDelegateDefaults(this.options.defaults, delegate.defaults);
     return new AdaptiveAgent({
       model: delegate.model ?? this.options.model,
       tools,
@@ -1374,7 +1426,7 @@ export class AdaptiveAgent {
       transactionStore: this.options.transactionStore,
       eventSink: this.options.eventSink,
       logger: this.options.logger,
-      defaults: { ...this.options.defaults, ...delegate.defaults },
+      defaults,
       systemInstructions: delegate.instructions,
     });
   }
@@ -1414,6 +1466,7 @@ export class AdaptiveAgent {
       delegateName: run.delegateName,
       delegationDepth: run.delegationDepth,
       stepId,
+      toolCallId,
       planId: run.currentPlanId,
       planExecutionId: run.currentPlanExecutionId,
       input: run.input,
@@ -2863,6 +2916,17 @@ function toolRetryPolicyAllows(tool: ToolDefinition, failureKind: FailureKind): 
   }
 
   return retryOn.includes(failureKind);
+}
+
+function mergeDelegateDefaults(
+  parentDefaults: AdaptiveAgentOptions['defaults'],
+  delegateDefaults: NonNullable<AdaptiveAgentOptions['delegates']>[number]['defaults'],
+): AdaptiveAgentOptions['defaults'] {
+  const defaults = { ...parentDefaults, ...delegateDefaults };
+  if (parentDefaults?.maxSteps !== undefined) {
+    defaults.maxSteps = Math.max(parentDefaults.maxSteps, delegateDefaults?.maxSteps ?? parentDefaults.maxSteps);
+  }
+  return defaults;
 }
 
 function createAbortTimeoutContext(timeoutMs: number): {

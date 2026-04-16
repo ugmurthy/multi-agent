@@ -256,6 +256,264 @@ describe('AdaptiveAgent', () => {
     }
   });
 
+  it('rejects MAX_STEPS retry until the configured step budget is raised', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const toolExecutionStore = new InMemoryToolExecutionStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'lookup-call-1',
+            name: 'lookup',
+            input: { topic: 'budget' },
+          },
+        ],
+      },
+    ]);
+
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createLookupTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+      toolExecutionStore,
+      defaults: { maxSteps: 1 },
+    });
+
+    const failed = await agent.run({ goal: 'Use a tool then continue' });
+    expect(failed).toMatchObject({
+      status: 'failure',
+      code: 'MAX_STEPS',
+      stepsUsed: 1,
+    });
+
+    await expect(agent.retry(failed.runId)).rejects.toThrowError(
+      `increase maxSteps above ${failed.stepsUsed} before retrying`,
+    );
+  });
+
+  it('recovers a MAX_STEPS failure when restarted with a higher step budget', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const toolExecutionStore = new InMemoryToolExecutionStore();
+    const initialModel = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'lookup-call-1',
+            name: 'lookup',
+            input: { topic: 'budget' },
+          },
+        ],
+      },
+    ]);
+
+    const initialAgent = new AdaptiveAgent({
+      model: initialModel,
+      tools: [createLookupTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+      toolExecutionStore,
+      defaults: { maxSteps: 1 },
+    });
+
+    const failed = await initialAgent.run({ goal: 'Use a tool then continue' });
+    expect(failed).toMatchObject({
+      status: 'failure',
+      code: 'MAX_STEPS',
+      stepsUsed: 1,
+    });
+
+    const restartedModel = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'lookup-call-2',
+            name: 'lookup',
+            input: { topic: 'second-budget' },
+          },
+        ],
+      },
+    ]);
+    const restartedAgent = new AdaptiveAgent({
+      model: restartedModel,
+      tools: [createLookupTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+      toolExecutionStore,
+      defaults: { maxSteps: 2 },
+    });
+
+    const failedAgain = await restartedAgent.retry(failed.runId);
+    expect(failedAgain).toMatchObject({
+      status: 'failure',
+      code: 'MAX_STEPS',
+      runId: failed.runId,
+      stepsUsed: 2,
+    });
+
+    const raisedAgainModel = new SequenceModel([
+      {
+        finishReason: 'stop',
+        structuredOutput: { status: 'continued after budget increase' },
+      },
+    ]);
+    const raisedAgainAgent = new AdaptiveAgent({
+      model: raisedAgainModel,
+      tools: [createLookupTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+      toolExecutionStore,
+      defaults: { maxSteps: 3 },
+    });
+
+    const retried = await raisedAgainAgent.retry(failed.runId);
+
+    expect(retried).toMatchObject({
+      status: 'success',
+      runId: failed.runId,
+      output: { status: 'continued after budget increase' },
+      stepsUsed: 3,
+    });
+    expect(raisedAgainModel.receivedRequests[0]?.messages.at(-1)).toMatchObject({
+      role: 'tool',
+      name: 'lookup',
+      toolCallId: 'lookup-call-2',
+      content: expect.stringContaining('researched:second-budget'),
+    });
+
+    const storedRun = await runStore.getRun(failed.runId);
+    expect(storedRun?.metadata).toMatchObject({
+      retryAttempts: 2,
+      lastRetryFailureKind: 'max_steps',
+    });
+  });
+
+  it('recovers a delegated child MAX_STEPS failure through parent retry when the delegate budget is raised', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const initialModel = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'parent-call-1',
+            name: 'delegate.researcher',
+            input: {
+              goal: 'Research budget recovery',
+              input: { topic: 'budget' },
+            },
+          },
+        ],
+      },
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'child-call-1',
+            name: 'lookup',
+            input: { topic: 'budget' },
+          },
+        ],
+      },
+    ]);
+
+    const initialAgent = new AdaptiveAgent({
+      model: initialModel,
+      tools: [createLookupTool()],
+      delegates: [
+        {
+          name: 'researcher',
+          description: 'Researches a topic using the lookup tool.',
+          allowedTools: ['lookup'],
+          defaults: { maxSteps: 1 },
+        },
+      ],
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const failed = await initialAgent.run({ goal: 'Delegate then continue' });
+    expect(failed).toMatchObject({
+      status: 'failure',
+      code: 'MAX_STEPS',
+      stepsUsed: 0,
+    });
+
+    const childRuns = await runStore.listChildren(failed.runId);
+    expect(childRuns).toHaveLength(1);
+    expect(childRuns[0]).toMatchObject({
+      status: 'failed',
+      errorCode: 'MAX_STEPS',
+    });
+
+    const restartedModel = new SequenceModel([
+      {
+        finishReason: 'stop',
+        structuredOutput: {
+          finding: 'recovered child result',
+        },
+      },
+      {
+        finishReason: 'stop',
+        structuredOutput: {
+          report: 'parent continued after child recovery',
+        },
+      },
+    ]);
+    const restartedAgent = new AdaptiveAgent({
+      model: restartedModel,
+      tools: [createLookupTool()],
+      delegates: [
+        {
+          name: 'researcher',
+          description: 'Researches a topic using the lookup tool.',
+          allowedTools: ['lookup'],
+          defaults: { maxSteps: 2 },
+        },
+      ],
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const retried = await restartedAgent.retry(failed.runId);
+
+    expect(retried).toMatchObject({
+      status: 'success',
+      runId: failed.runId,
+      output: {
+        report: 'parent continued after child recovery',
+      },
+      stepsUsed: 2,
+    });
+
+    const retriedChildren = await runStore.listChildren(failed.runId);
+    expect(retriedChildren).toHaveLength(2);
+    expect(retriedChildren[0]).toMatchObject({
+      status: 'failed',
+      errorCode: 'MAX_STEPS',
+    });
+    expect(retriedChildren[1]).toMatchObject({
+      status: 'succeeded',
+      result: {
+        finding: 'recovered child result',
+      },
+    });
+  });
+
   it('uses a transaction store for initial run creation and snapshot persistence', async () => {
     const runStore = new InMemoryRunStore();
     const eventStore = new InMemoryEventStore();
@@ -807,6 +1065,12 @@ describe('AdaptiveAgent', () => {
           event.payload.toolName === 'web_like.lookup',
       )?.payload,
     ).toMatchObject({
+      input: {
+        preview: {
+          query: 'recoverable error',
+        },
+        type: 'object',
+      },
       recoverable: true,
       output: {
         query: 'recoverable error',
@@ -1011,6 +1275,7 @@ describe('AdaptiveAgent', () => {
     const runStore = new InMemoryRunStore();
     const eventStore = new InMemoryEventStore();
     const snapshotStore = new InMemorySnapshotStore();
+    const toolExecutionStore = new InMemoryToolExecutionStore();
     const agent = new AdaptiveAgent({
       model: new SequenceModel([
         {
@@ -1060,6 +1325,7 @@ describe('AdaptiveAgent', () => {
       runStore,
       eventStore,
       snapshotStore,
+      toolExecutionStore,
     });
 
     const result = await agent.run({ goal: 'Write a delegation memo' });
@@ -1094,6 +1360,94 @@ describe('AdaptiveAgent', () => {
     ).toMatchObject({
       output: {
         finding: 'researched:delegation',
+      },
+    });
+
+    const delegateExecution = await toolExecutionStore.getByIdempotencyKey(`${result.runId}:step-1:parent-call-1`);
+    expect(delegateExecution).toMatchObject({
+      toolName: 'delegate.researcher',
+      input: {
+        goal: 'Research delegation',
+        input: { topic: 'delegation' },
+      },
+      childRunId: childRuns[0]?.id,
+      status: 'completed',
+      output: {
+        finding: 'researched:delegation',
+      },
+    });
+  });
+
+  it('uses explicit parent maxSteps as a floor for delegated child agents', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const agent = new AdaptiveAgent({
+      model: new SequenceModel([
+        {
+          finishReason: 'tool_calls',
+          toolCalls: [
+            {
+              id: 'parent-call-1',
+              name: 'delegate.researcher',
+              input: {
+                goal: 'Research with raised parent budget',
+                input: { topic: 'raised-budget' },
+              },
+            },
+          ],
+        },
+        {
+          finishReason: 'tool_calls',
+          toolCalls: [
+            {
+              id: 'child-call-1',
+              name: 'lookup',
+              input: { topic: 'raised-budget' },
+            },
+          ],
+        },
+        {
+          finishReason: 'stop',
+          structuredOutput: {
+            finding: 'researched:raised-budget',
+          },
+        },
+        {
+          finishReason: 'stop',
+          structuredOutput: {
+            report: 'delegation complete',
+          },
+        },
+      ]),
+      tools: [createLookupTool()],
+      delegates: [
+        {
+          name: 'researcher',
+          description: 'Researches a topic using the lookup tool.',
+          allowedTools: ['lookup'],
+          defaults: { maxSteps: 1 },
+        },
+      ],
+      defaults: { maxSteps: 3 },
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const result = await agent.run({ goal: 'Delegate with raised parent budget' });
+
+    expect(result).toMatchObject({
+      status: 'success',
+      output: {
+        report: 'delegation complete',
+      },
+    });
+    const childRuns = await runStore.listChildren(result.runId);
+    expect(childRuns[0]).toMatchObject({
+      status: 'succeeded',
+      result: {
+        finding: 'researched:raised-budget',
       },
     });
   });

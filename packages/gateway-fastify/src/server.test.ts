@@ -234,6 +234,76 @@ describe('createGatewayServer', () => {
     }
   });
 
+  it('includes failed run error text in outbound WebSocket frame logs', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let socket: WebSocket | undefined;
+
+    try {
+      const stores = createInMemoryGatewayStores();
+      const run = vi.fn(async () => ({
+        status: 'failure' as const,
+        runId: 'run-failed-1',
+        error: 'Model context window exceeded after approval resume',
+        code: 'MODEL_ERROR' as const,
+        stepsUsed: 12,
+        usage: { promptTokens: 100000, completionTokens: 0, estimatedCostUSD: 0 },
+      }));
+      const app = await createGatewayServer(
+        {
+          ...createChatGatewayConfig(),
+          server: {
+            ...baseConfig.server,
+            requestLogging: true,
+          },
+        },
+        {
+          agentRegistry: createGatewayTestAgentRegistry({
+            run,
+            runtimeRuns: {
+              'run-failed-1': { id: 'run-failed-1', rootRunId: 'run-failed-1', status: 'failed' },
+            },
+          }),
+          stores,
+          now: () => new Date('2026-04-08T10:00:00.000Z'),
+        },
+      );
+      apps.push(app);
+      await app.listen({ host: '127.0.0.1', port: 0 });
+
+      socket = await openTestWebSocket(`ws://127.0.0.1:${getListeningPort(app)}/ws?channelId=webchat`);
+      socket.send(JSON.stringify({ type: 'run.start', goal: 'Long run that fails after approval' }));
+      expect(JSON.parse(await waitForSocketMessage(socket))).toMatchObject({
+        type: 'run.output',
+        runId: 'run-failed-1',
+        status: 'failed',
+        error: 'Model context window exceeded after approval resume',
+      });
+
+      const logEntries = consoleSpy.mock.calls
+        .map((call) => call[0])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => JSON.parse(value));
+
+      expect(logEntries).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          event: 'ws.frame.sent',
+          message: 'WebSocket frame sent',
+          data: expect.objectContaining({
+            frameType: 'run.output',
+            runId: 'run-failed-1',
+            status: 'failed',
+            hasError: true,
+            error: 'Model context window exceeded after approval resume',
+          }),
+        }),
+      );
+    } finally {
+      socket?.close();
+      consoleSpy.mockRestore();
+    }
+  });
+
   it('routes websocket messages through the validated protocol handler', async () => {
     expect(await handleGatewaySocketMessage(JSON.stringify({ type: 'ping', id: 'heartbeat-1' }))).toEqual({
       type: 'pong',

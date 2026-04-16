@@ -80,6 +80,7 @@ interface AgentEventRow {
   plan_execution_id: string | null;
   seq: string | number;
   step_id: string | null;
+  tool_call_id: string | null;
   event_type: string;
   schema_version: number;
   payload: JsonValue;
@@ -153,6 +154,8 @@ interface ToolExecutionRow {
   idempotency_key: string;
   status: string;
   input_hash: string;
+  input: JsonValue | null;
+  child_run_id: string | null;
   output: JsonValue | null;
   error_code: string | null;
   error_message: string | null;
@@ -265,10 +268,10 @@ export const POSTGRES_RUNTIME_RUN_QUERIES = {
 export const POSTGRES_RUNTIME_EVENT_QUERIES = {
   append: `
     INSERT INTO agent_events (
-      run_id, plan_execution_id, seq, step_id, event_type, schema_version, payload
+      run_id, plan_execution_id, seq, step_id, tool_call_id, event_type, schema_version, payload
     )
     SELECT
-      $1, $2, COALESCE(MAX(seq), 0) + 1, $3, $4, $5, $6
+      $1, $2, COALESCE(MAX(seq), 0) + 1, $3, $4, $5, $6, $7
     FROM agent_events
     WHERE run_id = $1
     RETURNING *
@@ -362,12 +365,18 @@ export const POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES = {
   markStarted: `
     INSERT INTO tool_executions (
       run_id, step_id, tool_call_id, tool_name, idempotency_key,
-      status, input_hash, started_at
+      status, input_hash, input, started_at
     ) VALUES (
       $1, $2, $3, $4, $5,
-      'started', $6, $7
+      'started', $6, $7, $8
     )
     ON CONFLICT (idempotency_key) DO NOTHING
+    RETURNING *
+  `,
+  markChildRunLinked: `
+    UPDATE tool_executions SET
+      child_run_id = $2
+    WHERE idempotency_key = $1
     RETURNING *
   `,
   markCompleted: `
@@ -503,9 +512,9 @@ export class PostgresRunStore implements RunStore {
       delegationDepth,
       run.currentChildRunId ?? null,
       run.goal,
-      run.input ?? null,
-      run.context ?? null,
-      run.metadata ?? null,
+      jsonbParam(run.input),
+      jsonbParam(run.context),
+      jsonbParam(run.metadata),
       run.status,
       now,
       now,
@@ -563,10 +572,10 @@ export class PostgresRunStore implements RunStore {
       next.usage.completionTokens,
       next.usage.reasoningTokens ?? 0,
       next.usage.estimatedCostUSD,
-      next.result ?? null,
+      jsonbParam(next.result),
       next.errorCode ?? null,
       next.errorMessage ?? null,
-      next.metadata ?? null,
+      jsonbParam(next.metadata),
       next.updatedAt,
       next.completedAt ?? null,
       current.version,
@@ -631,9 +640,10 @@ export class PostgresEventStore implements EventStore, EventSink {
       event.runId,
       event.planExecutionId ?? null,
       event.stepId ?? null,
+      event.toolCallId ?? null,
       event.type,
       event.schemaVersion,
-      event.payload,
+      jsonbParam(event.payload),
     ]);
     const persistedEvent = eventRowToRecord(firstRow(result, `Failed to append event for run ${event.runId}`));
     for (const listener of this.listeners) {
@@ -671,8 +681,8 @@ export class PostgresSnapshotStore implements SnapshotStore {
       snapshot.currentStepId ?? null,
       snapshot.currentPlanId ?? null,
       snapshot.currentPlanExecutionId ?? null,
-      snapshot.summary,
-      snapshot.state,
+      jsonbParam(snapshot.summary),
+      jsonbParam(snapshot.state),
     ]);
 
     return snapshotRowToRecord(firstRow(result, `Failed to save snapshot ${snapshot.runId}@${snapshot.snapshotSeq}`));
@@ -695,14 +705,14 @@ export class PostgresPlanStore implements PlanStore {
       plan.status,
       plan.goal,
       plan.summary,
-      plan.inputSchema ?? null,
-      plan.successCriteria ?? null,
+      jsonbParam(plan.inputSchema),
+      jsonbParam(plan.successCriteria),
       plan.toolsetHash,
       plan.plannerModel ?? null,
       plan.plannerPromptVersion ?? null,
       plan.createdFromRunId ?? null,
       plan.parentPlanId ?? null,
-      plan.metadata ?? null,
+      jsonbParam(plan.metadata),
       now,
     ]);
     const createdPlan = planRowToRecord(firstRow(result, `Failed to create plan ${plan.id}`), []);
@@ -720,9 +730,9 @@ export class PostgresPlanStore implements PlanStore {
         step.id,
         step.title,
         step.toolName,
-        step.inputTemplate,
+        jsonbParam(step.inputTemplate),
         step.outputKey ?? null,
-        step.preconditions ?? [],
+        jsonbParam(step.preconditions ?? []),
         step.onFailure,
         step.requiresApproval ?? false,
       ]);
@@ -759,11 +769,11 @@ export class PostgresPlanStore implements PlanStore {
       execution.runId,
       execution.attempt,
       execution.status,
-      execution.input ?? null,
-      execution.context ?? null,
+      jsonbParam(execution.input),
+      jsonbParam(execution.context),
       execution.currentStepId ?? null,
       execution.currentStepIndex ?? null,
-      execution.output ?? null,
+      jsonbParam(execution.output),
       execution.replanReason ?? null,
       now,
       now,
@@ -811,11 +821,11 @@ export class PostgresPlanStore implements PlanStore {
     const result = await this.client.query<PlanExecutionRow>(POSTGRES_RUNTIME_PLAN_QUERIES.updateExecution, [
       executionId,
       next.status,
-      next.input ?? null,
-      next.context ?? null,
+      jsonbParam(next.input),
+      jsonbParam(next.context),
       next.currentStepId ?? null,
       next.currentStepIndex ?? null,
-      next.output ?? null,
+      jsonbParam(next.output),
       next.replanReason ?? null,
       next.updatedAt,
       next.completedAt ?? null,
@@ -845,6 +855,7 @@ export class PostgresToolExecutionStore implements ToolExecutionStore {
       record.toolName,
       record.idempotencyKey,
       record.inputHash,
+      jsonbParam(record.input),
       now,
     ]);
 
@@ -861,10 +872,19 @@ export class PostgresToolExecutionStore implements ToolExecutionStore {
     return existing;
   }
 
+  async markChildRunLinked(idempotencyKey: string, childRunId: UUID): Promise<ToolExecutionRecord> {
+    const result = await this.client.query<ToolExecutionRow>(
+      POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES.markChildRunLinked,
+      [idempotencyKey, childRunId],
+    );
+
+    return toolExecutionRowToRecord(firstRow(result, `Tool execution ${idempotencyKey} does not exist`));
+  }
+
   async markCompleted(idempotencyKey: string, output: JsonValue): Promise<ToolExecutionRecord> {
     const result = await this.client.query<ToolExecutionRow>(POSTGRES_RUNTIME_TOOL_EXECUTION_QUERIES.markCompleted, [
       idempotencyKey,
-      output,
+      jsonbParam(output),
       new Date().toISOString(),
     ]);
 
@@ -1038,6 +1058,10 @@ function usageFromRunRow(row: AgentRunRow): UsageSummary {
   };
 }
 
+function jsonbParam(value: unknown): string | null {
+  return value === undefined || value === null ? null : JSON.stringify(value);
+}
+
 function eventRowToRecord(row: AgentEventRow): AgentEvent {
   return {
     id: String(row.id),
@@ -1046,6 +1070,7 @@ function eventRowToRecord(row: AgentEventRow): AgentEvent {
     seq: Number(row.seq),
     type: row.event_type as AgentEvent['type'],
     stepId: row.step_id ?? undefined,
+    toolCallId: row.tool_call_id ?? undefined,
     schemaVersion: row.schema_version,
     payload: row.payload,
     createdAt: row.created_at,
@@ -1129,6 +1154,8 @@ function toolExecutionRowToRecord(row: ToolExecutionRow): ToolExecutionRecord {
     idempotencyKey: row.idempotency_key,
     status: row.status as ToolExecutionStatus,
     inputHash: row.input_hash,
+    input: row.input ?? undefined,
+    childRunId: row.child_run_id ?? undefined,
     output: row.output ?? undefined,
     errorCode: row.error_code ?? undefined,
     errorMessage: row.error_message ?? undefined,

@@ -234,6 +234,10 @@ describe('GATEWAY_LOG_EVENTS', () => {
     expect(GATEWAY_LOG_EVENTS.hook_failure).toBe('hook.failure');
     expect(GATEWAY_LOG_EVENTS.cron_claimed).toBe('cron.claimed');
     expect(GATEWAY_LOG_EVENTS.cron_completed).toBe('cron.completed');
+    expect(GATEWAY_LOG_EVENTS.cron_file_imported).toBe('cron.file.imported');
+    expect(GATEWAY_LOG_EVENTS.cron_file_updated).toBe('cron.file.updated');
+    expect(GATEWAY_LOG_EVENTS.cron_file_sync_completed).toBe('cron.file_sync.completed');
+    expect(GATEWAY_LOG_EVENTS.cron_file_sync_failed).toBe('cron.file_sync.failed');
     expect(GATEWAY_LOG_EVENTS.protocol_error).toBe('protocol.error');
     expect(GATEWAY_LOG_EVENTS.health_changed).toBe('health.changed');
   });

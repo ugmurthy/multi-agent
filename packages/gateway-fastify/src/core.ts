@@ -121,9 +121,12 @@ export interface RuntimeRunRecord {
   id: string;
   rootRunId: string;
   parentRunId?: string;
+  currentChildRunId?: string;
+  version?: number;
   status: string;
   leaseOwner?: string;
   leaseExpiresAt?: string;
+  heartbeatAt?: string;
   errorMessage?: string;
   result?: JsonValue;
   metadata?: JsonObject;
@@ -131,6 +134,7 @@ export interface RuntimeRunRecord {
 
 export interface RuntimeRunStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
+  updateRun?(runId: string, patch: Partial<RuntimeRunRecord>, expectedVersion?: number): Promise<RuntimeRunRecord>;
 }
 
 export interface RuntimeAgentEvent {
@@ -204,7 +208,18 @@ export interface CreatedAdaptiveAgent {
     eventStore: RuntimeEventStore | unknown;
     snapshotStore: unknown;
     planStore: unknown;
+    toolExecutionStore?: unknown;
+    transactionStore?: unknown;
   };
+}
+
+export interface AdaptiveAgentRuntimeOptions {
+  runStore?: RuntimeRunStore;
+  eventStore?: RuntimeEventStore | unknown;
+  snapshotStore?: unknown;
+  planStore?: unknown;
+  toolExecutionStore?: unknown;
+  transactionStore?: unknown;
 }
 
 export interface CreateAdaptiveAgentOptions {
@@ -214,6 +229,7 @@ export interface CreateAdaptiveAgentOptions {
   defaults?: Partial<AgentDefaults>;
   systemInstructions?: string;
   logger?: AdaptiveAgentLogger;
+  runtime?: AdaptiveAgentRuntimeOptions;
 }
 
 export type AdaptiveAgentLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent';

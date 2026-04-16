@@ -18,7 +18,7 @@ import {
 } from './channels.js';
 import { executeGatewayChatTurn } from './chat.js';
 import type { GatewayConfig } from './config.js';
-import type { JsonObject } from './core.js';
+import type { JsonObject, JsonValue } from './core.js';
 import {
   ProtocolValidationError,
   type InboundFrame,
@@ -48,6 +48,7 @@ export interface CreateGatewayServerOptions {
   now?: () => Date;
   sessionIdFactory?: () => string;
   transcriptMessageIdFactory?: () => string;
+  staleLeaseHeartbeatBefore?: Date;
 }
 
 export interface GatewaySocketMessageContext {
@@ -65,6 +66,7 @@ export interface GatewaySocketMessageContext {
   now?: () => Date;
   sessionIdFactory?: () => string;
   transcriptMessageIdFactory?: () => string;
+  staleLeaseHeartbeatBefore?: Date;
 }
 
 export interface RuntimeObserverRegistration {
@@ -294,6 +296,7 @@ export async function createGatewayServer(
             now: options.now,
             sessionIdFactory: options.sessionIdFactory,
             transcriptMessageIdFactory: options.transcriptMessageIdFactory,
+            staleLeaseHeartbeatBefore: options.staleLeaseHeartbeatBefore,
           });
 
           await sendResponseFrame(frame);
@@ -353,6 +356,7 @@ export async function handleGatewaySocketMessage(
           agentRegistry: context.agentRegistry,
           authContext: context.authContext,
           now: context.now,
+          staleLeaseHeartbeatBefore: context.staleLeaseHeartbeatBefore,
         });
 
         context.channelManager?.subscribe(reconnectState.channels);
@@ -782,6 +786,7 @@ function summarizeOutboundFrameForLogging(frame: OutboundFrame): JsonObject {
         ...(frame.runId ? { runId: frame.runId } : {}),
         ...(frame.rootRunId ? { rootRunId: frame.rootRunId } : {}),
         ...(frame.parentRunId ? { parentRunId: frame.parentRunId } : {}),
+        ...summarizeAgentEventPayloadForLogging(frame.data),
       };
     case 'message.output':
       return {
@@ -800,6 +805,7 @@ function summarizeOutboundFrameForLogging(frame: OutboundFrame): JsonObject {
         status: frame.status,
         hasOutput: frame.output !== undefined,
         hasError: frame.error !== undefined,
+        ...(frame.error ? { error: truncateForLog(frame.error) } : {}),
       };
     case 'approval.requested':
       return {
@@ -823,6 +829,45 @@ function summarizeOutboundFrameForLogging(frame: OutboundFrame): JsonObject {
         ...(frame.id ? { pingId: frame.id } : {}),
       };
   }
+}
+
+function summarizeAgentEventPayloadForLogging(data: JsonValue): JsonObject {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return {};
+  }
+
+  const payload = data as JsonObject;
+  const summary: JsonObject = {};
+  const status = typeof payload.status === 'string' ? payload.status : undefined;
+  const code = typeof payload.code === 'string' ? payload.code : typeof payload.errorCode === 'string' ? payload.errorCode : undefined;
+  const failureKind = typeof payload.failureKind === 'string' ? payload.failureKind : undefined;
+  const error =
+    typeof payload.error === 'string'
+      ? payload.error
+      : typeof payload.reason === 'string'
+        ? payload.reason
+        : typeof payload.message === 'string'
+          ? payload.message
+          : undefined;
+
+  if (status) {
+    summary.eventStatus = status;
+  }
+  if (code) {
+    summary.errorCode = code;
+  }
+  if (failureKind) {
+    summary.failureKind = failureKind;
+  }
+  if (error) {
+    summary.error = truncateForLog(error);
+  }
+
+  return summary;
+}
+
+function truncateForLog(value: string, maxLength = 240): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
 
 function normalizeProtocolValidationError(error: unknown): ProtocolValidationError {

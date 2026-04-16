@@ -6,7 +6,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { bootstrapGateway } from './bootstrap.js';
 import type { CreatedAdaptiveAgent, RunResult } from './core.js';
+import type { AgentRegistryEntry } from './agent-registry.js';
 import { createInMemoryGatewayStores } from './stores.js';
+import type { PostgresClient } from './stores-postgres.js';
+
+function createMockPostgresClient(): PostgresClient & { calls: Array<{ sql: string; params?: unknown[] }> } {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  return {
+    calls,
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    },
+  };
+}
 
 function createStubAgent(): CreatedAdaptiveAgent {
   const runResult: RunResult = {
@@ -243,13 +256,189 @@ describe('bootstrapGateway cron lifecycle', () => {
     });
 
     try {
+      await gateway.app.listen({ host: '127.0.0.1', port: 0 });
       await gateway.app.inject({ method: 'GET', url: '/health' });
     } finally {
       await gateway.app.close();
     }
 
     const logContents = await readFile(join(logDir, `gateway-${formatLogDate()}.log`), 'utf-8');
+    const logEntries = logContents
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { event: string; data?: { bootId?: string; port?: number; durationMs?: number } });
+    const started = logEntries.find((entry) => entry.event === 'gateway.server.started');
+    const stopping = logEntries.find((entry) => entry.event === 'gateway.server.stopping');
+    const stopped = logEntries.find((entry) => entry.event === 'gateway.server.stopped');
+
+    expect(started?.data?.bootId).toBe(gateway.bootId);
+    expect(started?.data?.port).toBeGreaterThan(0);
+    expect(stopping?.data?.bootId).toBe(gateway.bootId);
+    expect(stopped?.data?.bootId).toBe(gateway.bootId);
+    expect(stopped?.data?.durationMs).toBeGreaterThanOrEqual(0);
     expect(logContents).toContain('"event":"http.request.started"');
     expect(logContents).toContain('"event":"http.request.completed"');
+  });
+
+  it('resolves shared Postgres runtime stores on the default bootstrap path when stores.kind is postgres', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    const agentDirectory = join(workspace, 'agents');
+    const agentConfigPath = join(agentDirectory, 'test-agent.json');
+
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+          },
+          stores: {
+            kind: 'postgres',
+            connectionString: 'postgres://ignored/test',
+          },
+          bindings: [],
+          defaultAgentId: 'test-agent',
+          hooks: {
+            failurePolicy: 'fail',
+            modules: [],
+            onAuthenticate: [],
+            onSessionResolve: [],
+            beforeRoute: [],
+            beforeInboundMessage: [],
+            beforeRunStart: [],
+            afterRunResult: [],
+            onAgentEvent: [],
+            beforeOutboundFrame: [],
+            onDisconnect: [],
+            onError: [],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(
+      agentConfigPath,
+      JSON.stringify(
+        {
+          id: 'test-agent',
+          name: 'Test Agent',
+          invocationModes: ['chat', 'run'],
+          defaultInvocationMode: 'chat',
+          model: {
+            provider: 'ollama',
+            model: 'test-model',
+          },
+          tools: [],
+          delegates: [],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const postgresClient = createMockPostgresClient();
+    const gateway = await bootstrapGateway({
+      gatewayConfigPath,
+      agentConfigDir: agentDirectory,
+      postgresClient,
+    });
+
+    try {
+      expect(gateway.runtimeStores).toBeDefined();
+      expect(postgresClient.calls.some(({ sql }) => sql.includes('adaptive_agent_migrations'))).toBe(true);
+    } finally {
+      await gateway.app.close();
+    }
+  });
+
+  it('passes Postgres runtime stores through to a custom agentFactory entry when stores.kind is postgres', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    const agentDirectory = join(workspace, 'agents');
+    const agentConfigPath = join(agentDirectory, 'test-agent.json');
+
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+          },
+          stores: {
+            kind: 'postgres',
+            connectionString: 'postgres://ignored/test',
+          },
+          bindings: [],
+          defaultAgentId: 'test-agent',
+          hooks: {
+            failurePolicy: 'fail',
+            modules: [],
+            onAuthenticate: [],
+            onSessionResolve: [],
+            beforeRoute: [],
+            beforeInboundMessage: [],
+            beforeRunStart: [],
+            afterRunResult: [],
+            onAgentEvent: [],
+            beforeOutboundFrame: [],
+            onDisconnect: [],
+            onError: [],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(
+      agentConfigPath,
+      JSON.stringify(
+        {
+          id: 'test-agent',
+          name: 'Test Agent',
+          invocationModes: ['chat', 'run'],
+          defaultInvocationMode: 'chat',
+          model: {
+            provider: 'ollama',
+            model: 'test-model',
+          },
+          tools: [],
+          delegates: [],
+        },
+        null,
+        2,
+      ),
+    );
+
+    let capturedEntry: AgentRegistryEntry | undefined;
+    const postgresClient = createMockPostgresClient();
+    const gateway = await bootstrapGateway({
+      gatewayConfigPath,
+      agentConfigDir: agentDirectory,
+      postgresClient,
+      agentFactory: (entry) => {
+        capturedEntry = entry;
+        return createStubAgent();
+      },
+    });
+
+    try {
+      await gateway.agentRegistry.getAgent('test-agent');
+      expect(capturedEntry?.runtime?.runStore).toBe(gateway.runtimeStores?.runStore);
+      expect(capturedEntry?.runtime?.eventStore).toBe(gateway.runtimeStores?.eventStore);
+    } finally {
+      await gateway.app.close();
+    }
   });
 });

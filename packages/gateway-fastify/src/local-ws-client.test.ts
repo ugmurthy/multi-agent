@@ -172,6 +172,105 @@ describe('formatCompactAgentEventFrame', () => {
     ).toBe('[12:34:56] run:12345678 #7 tool read_file started');
   });
 
+  it('formats known tool input summaries without multiline content', () => {
+    const baseFrame = {
+      type: 'agent.event' as const,
+      runId: '12345678-aaaa-bbbb-cccc-1234567890ab',
+      seq: 7,
+      createdAt: '2026-04-10T12:34:56.000Z',
+    };
+
+    expect(
+      formatCompactAgentEventFrame({
+        ...baseFrame,
+        eventType: 'read_web_page',
+        data: {},
+      }),
+    ).toBe('[12:34:56] run:12345678 #7 read_web_page');
+
+    expect(
+      formatCompactAgentEventFrame({
+        ...baseFrame,
+        eventType: 'tool.started',
+        data: { toolName: 'read_web_page', input: { url: 'https://docs.example.com/api/agents?view=latest' } },
+      }),
+    ).toBe('[12:34:56] run:12345678 #7 tool read_web_page url=https://docs.example.com/api/agents?view=latest started');
+
+    expect(
+      formatCompactAgentEventFrame({
+        ...baseFrame,
+        eventType: 'tool.started',
+        data: { toolName: 'web_search', input: { query: 'OpenAI GPT-5.4 API docs', maxResults: 5 } },
+      }),
+    ).toBe('[12:34:56] run:12345678 #7 tool web_search q="OpenAI GPT-5.4 API docs" max=5 started');
+
+    expect(
+      formatCompactAgentEventFrame({
+        ...baseFrame,
+        eventType: 'tool.started',
+        data: { toolName: 'shell_exec', input: { command: 'bunx vitest run packages/core/src/tools/tools.test.ts', cwd: '.' } },
+      }),
+    ).toBe('[12:34:56] run:12345678 #7 tool shell_exec cmd="bunx vitest run packages/core/src/tools/tools.test.ts" cwd=. started');
+  });
+
+  it('summarizes write_file content by size', () => {
+    expect(
+      formatCompactAgentEventFrame({
+        type: 'agent.event',
+        eventType: 'tool.started',
+        data: {
+          toolName: 'write_file',
+          input: {
+            path: 'packages/core/src/foo.ts',
+            content: 'hello\nworld',
+          },
+        },
+        runId: '12345678-aaaa-bbbb-cccc-1234567890ab',
+        seq: 8,
+        createdAt: '2026-04-10T12:34:57.000Z',
+      }),
+    ).toBe('[12:34:57] run:12345678 #8 tool write_file path=packages/core/src/foo.ts content=11B started');
+  });
+
+  it('reads summarized event input and keeps compact output on one line', () => {
+    const output = formatCompactAgentEventFrame({
+      type: 'agent.event',
+      eventType: 'tool.started',
+      data: {
+        toolName: 'web_search',
+        input: {
+          type: 'object',
+          keyCount: 1,
+          preview: {
+            query: 'first line\nsecond line',
+          },
+        },
+      },
+      runId: '12345678-aaaa-bbbb-cccc-1234567890ab',
+      seq: 9,
+      createdAt: '2026-04-10T12:34:58.000Z',
+    });
+
+    expect(output).toBe('[12:34:58] run:12345678 #9 tool web_search q="first line second line" started');
+    expect(output).not.toContain('\n');
+  });
+
+  it('can use the TUI sequence-only compact prefix', () => {
+    expect(
+      formatCompactAgentEventFrame(
+        {
+          type: 'agent.event',
+          eventType: 'tool.started',
+          data: { toolName: 'read_file', input: { path: 'packages/core/src/index.ts' } },
+          runId: '12345678-aaaa-bbbb-cccc-1234567890ab',
+          seq: 10,
+          createdAt: '2026-04-10T12:34:59.000Z',
+        },
+        { prefixStyle: 'seq' },
+      ),
+    ).toBe('[10] run:12345678 tool read_file path=packages/core/src/index.ts started');
+  });
+
   it('formats status transitions using payload details', () => {
     expect(
       formatCompactAgentEventFrame({

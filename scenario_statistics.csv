@@ -1,0 +1,5 @@
+Scenario,Probability,Oil_Price_Mean,Oil_Price_Std,Ceasefire_Min,Ceasefire_Max,GDP_Impact_Min,GDP_Impact_Max,Inflation_Min,Inflation_Max,Description
+successful_negotiation,0.25,85,10,60,90,-0.3,-0.5,4.0,5.0,Successful diplomatic resolution
+continued_blockade_escalation,0.25,135,15,7,30,-2.0,-1.2,6.5,8.0,Escalating conflict with continued blockade
+partial_agreement,0.15,105,12,30,60,-1.0,-0.6,5.0,6.0,Partial agreement with limited trade resumption
+full_scale_regional_war,0.35,145,20,7,15,-2.5,-1.8,7.0,9.0,Full-scale regional war outbreak

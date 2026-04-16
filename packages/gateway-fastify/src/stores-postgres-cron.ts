@@ -170,14 +170,14 @@ function cronJobCreateParams(job: GatewayCronJobRecord): unknown[] {
     job.id,
     job.schedule,
     job.targetKind,
-    job.target,
+    jsonbParam(job.target),
     job.deliveryMode,
-    job.delivery,
+    jsonbParam(job.delivery),
     job.enabled,
     job.nextFireAt,
     job.leaseOwner ?? null,
     job.leaseExpiresAt ?? null,
-    job.metadata ?? null,
+    jsonbParam(job.metadata),
     job.createdAt,
     job.updatedAt,
   ];
@@ -188,14 +188,14 @@ function cronJobUpdateParams(job: GatewayCronJobRecord): unknown[] {
     job.id,
     job.schedule,
     job.targetKind,
-    job.target,
+    jsonbParam(job.target),
     job.deliveryMode,
-    job.delivery,
+    jsonbParam(job.delivery),
     job.enabled,
     job.nextFireAt,
     job.leaseOwner ?? null,
     job.leaseExpiresAt ?? null,
-    job.metadata ?? null,
+    jsonbParam(job.metadata),
     job.updatedAt,
   ];
 }
@@ -231,8 +231,8 @@ function cronRunCreateParams(run: GatewayCronRunRecord): unknown[] {
     run.startedAt,
     run.finishedAt ?? null,
     run.error ?? null,
-    run.output ?? null,
-    run.metadata ?? null,
+    jsonbParam(run.output),
+    jsonbParam(run.metadata),
   ];
 }
 
@@ -246,9 +246,13 @@ function cronRunUpdateParams(run: GatewayCronRunRecord): unknown[] {
     run.leaseOwner ?? null,
     run.finishedAt ?? null,
     run.error ?? null,
-    run.output ?? null,
-    run.metadata ?? null,
+    jsonbParam(run.output),
+    jsonbParam(run.metadata),
   ];
+}
+
+function jsonbParam(value: JsonValue | undefined | null): string | null {
+  return value === undefined || value === null ? null : JSON.stringify(value);
 }
 
 export interface ClaimLeaseOptions {

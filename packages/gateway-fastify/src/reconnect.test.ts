@@ -499,6 +499,108 @@ describe('restoreActiveSession', () => {
     expect(result.sessionUpdated.status).toBe('idle');
   });
 
+  it('clears a pre-boot active lease and resumes immediately on reconnect', async () => {
+    const stores = createInMemoryGatewayStores();
+    await stores.sessions.create(runningSession());
+    const resume = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-42',
+      output: { recovered: true },
+      stepsUsed: 3,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0 },
+    }));
+    const runtimeRuns: Record<string, RuntimeRunRecord> = {
+      'run-42': {
+        id: 'run-42',
+        rootRunId: 'root-42',
+        version: 7,
+        status: 'running',
+        leaseOwner: 'worker-old',
+        leaseExpiresAt: '2026-01-01T01:05:00.000Z',
+        heartbeatAt: '2026-01-01T00:59:59.000Z',
+      },
+    };
+
+    const result = await restoreActiveSession('sess-running', {
+      stores,
+      authContext: authUser1,
+      agentRegistry: createReconnectAgentRegistry(runtimeRuns, { resume }),
+      now: fixedNow,
+      staleLeaseHeartbeatBefore: new Date('2026-01-01T01:00:00.000Z'),
+    });
+
+    expect(result.policy).toBe('resumed');
+    expect(resume).toHaveBeenCalledWith('run-42');
+    expect(runtimeRuns['run-42']).toMatchObject({
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      heartbeatAt: undefined,
+    });
+    expect(result.recoveryFrame).toEqual({
+      type: 'run.output',
+      runId: 'run-42',
+      rootRunId: 'root-42',
+      sessionId: 'sess-running',
+      status: 'succeeded',
+      output: { recovered: true },
+    });
+  });
+
+  it('clears the stale child lease before resuming an awaiting_subagent parent after restart', async () => {
+    const stores = createInMemoryGatewayStores();
+    await stores.sessions.create(runningSession());
+    const resume = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-42',
+      output: { recovered: true },
+      stepsUsed: 3,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0 },
+    }));
+    const runtimeRuns: Record<string, RuntimeRunRecord> = {
+      'run-42': {
+        id: 'run-42',
+        rootRunId: 'root-42',
+        version: 7,
+        status: 'awaiting_subagent',
+        currentChildRunId: 'child-99',
+        leaseOwner: 'worker-old-parent',
+        leaseExpiresAt: '2026-01-01T01:05:00.000Z',
+        heartbeatAt: '2026-01-01T00:59:59.000Z',
+      },
+      'child-99': {
+        id: 'child-99',
+        rootRunId: 'root-42',
+        parentRunId: 'run-42',
+        version: 3,
+        status: 'running',
+        leaseOwner: 'worker-old-child',
+        leaseExpiresAt: '2026-01-01T01:05:00.000Z',
+        heartbeatAt: '2026-01-01T00:59:59.000Z',
+      },
+    };
+
+    const result = await restoreActiveSession('sess-running', {
+      stores,
+      authContext: authUser1,
+      agentRegistry: createReconnectAgentRegistry(runtimeRuns, { resume }),
+      now: fixedNow,
+      staleLeaseHeartbeatBefore: new Date('2026-01-01T01:00:00.000Z'),
+    });
+
+    expect(result.policy).toBe('resumed');
+    expect(resume).toHaveBeenCalledWith('run-42');
+    expect(runtimeRuns['run-42']).toMatchObject({
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      heartbeatAt: undefined,
+    });
+    expect(runtimeRuns['child-99']).toMatchObject({
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      heartbeatAt: undefined,
+    });
+  });
+
   it('reattaches as an observer when the active runtime lease is still valid', async () => {
     const stores = createInMemoryGatewayStores();
     await stores.sessions.create(runningSession());
@@ -575,6 +677,19 @@ function createReconnectAgentRegistry(
       runtime: {
         runStore: {
           getRun: async (runId: string) => runtimeRuns[runId] ?? null,
+          updateRun: async (runId: string, patch: Partial<RuntimeRunRecord>) => {
+            const run = runtimeRuns[runId];
+            if (!run) {
+              throw new Error(`Run ${runId} does not exist`);
+            }
+
+            runtimeRuns[runId] = {
+              ...run,
+              ...patch,
+              version: (run.version ?? 0) + 1,
+            };
+            return runtimeRuns[runId]!;
+          },
         },
         eventStore: {},
         snapshotStore: {},

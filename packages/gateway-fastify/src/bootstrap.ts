@@ -1,4 +1,6 @@
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
+import type { AddressInfo } from 'node:net';
 
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 
@@ -13,11 +15,15 @@ import {
 import { AgentRegistry, createAgentRegistry, type AgentFactory } from './agent-registry.js';
 import { createJwtAuthProvider } from './auth.js';
 import { createAdaptiveAgentLogger, type AdaptiveAgentLogger } from './core.js';
-import { createGatewayLogger, DEFAULT_GATEWAY_REQUEST_LOG_DIR } from './observability.js';
+import { createGatewayLogger, DEFAULT_GATEWAY_REQUEST_LOG_DIR, GATEWAY_LOG_EVENTS, type GatewayLogger } from './observability.js';
 import { createGatewayServer } from './server.js';
 import { createModuleRegistry, ModuleRegistry, type ResolvedGatewayModules } from './registries.js';
+import { createCronFileSyncLoop, type CronFileSyncHandle } from './cron-file-sync.js';
 import { createSchedulerLoop, type SchedulerHandle, type SchedulerLoopOptions } from './scheduler.js';
-import { createInMemoryGatewayStores, type GatewayStores } from './stores.js';
+import type { PostgresPoolClient, PostgresRuntimeStoreBundle } from '@adaptive-agent/core';
+import { resolveGatewayStoreBundle, type ResolvedStoreBundle } from './store-factory.js';
+import type { PostgresClient } from './stores-postgres.js';
+import type { GatewayStores } from './stores.js';
 
 export interface BootstrapGatewayOptions {
   cwd?: string;
@@ -28,6 +34,7 @@ export interface BootstrapGatewayOptions {
   agentFactory?: AgentFactory;
   fastify?: FastifyServerOptions;
   stores?: GatewayStores;
+  postgresClient?: PostgresClient | PostgresPoolClient;
   scheduler?: Pick<SchedulerLoopOptions, 'idFactory' | 'leaseOwner' | 'now' | 'onError' | 'pollIntervalMs'>;
 }
 
@@ -39,7 +46,9 @@ export interface BootstrappedGateway {
   agentRegistry: AgentRegistry;
   gatewayModules: ResolvedGatewayModules;
   stores: GatewayStores;
+  runtimeStores?: PostgresRuntimeStoreBundle;
   scheduler?: SchedulerHandle;
+  bootId: string;
 }
 
 export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): Promise<BootstrappedGateway> {
@@ -58,85 +67,200 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
     loadedGatewayConfig.config,
     `gateway config (${loadedGatewayConfig.path})`,
   );
-  const agentRuntimeLogger = await createAgentRuntimeLogger(loadedGatewayConfig.config, options.logDir);
-  const agentRegistry = createAgentRegistry({
-    agents: loadedAgentConfigs,
-    moduleRegistry,
-    agentFactory: options.agentFactory,
-    logger: agentRuntimeLogger,
-  });
-  const stores = options.stores ?? createInMemoryGatewayStores();
-  const requestLogger = loadedGatewayConfig.config.server.requestLogging
-    ? createGatewayLogger({
-        destination: loadedGatewayConfig.config.server.requestLoggingDestination,
-        logDir: options.logDir,
-      })
-    : undefined;
+  let requestLogger: GatewayLogger | undefined;
+  let agentRuntimeLogger: AdaptiveAgentLogger | undefined;
+  let storeBundle: ResolvedStoreBundle | undefined;
+  const bootId = randomUUID();
+  const bootStartedAtMs = Date.now();
 
-  validateRoutingReferences(loadedGatewayConfig.config, agentRegistry, loadedGatewayConfig.path);
+  try {
+    storeBundle = await resolveGatewayStoreBundle({
+      storesConfig: loadedGatewayConfig.config.stores,
+      gatewayStoresOverride: options.stores,
+      postgresClient: options.postgresClient,
+    });
+    agentRuntimeLogger = await createAgentRuntimeLogger(loadedGatewayConfig.config, options.logDir);
+    const agentRegistry = createAgentRegistry({
+      agents: loadedAgentConfigs,
+      moduleRegistry,
+      agentFactory: options.agentFactory,
+      logger: agentRuntimeLogger,
+      runtime: storeBundle.runtimeStores,
+    });
+    const stores = storeBundle.gatewayStores;
+    requestLogger = loadedGatewayConfig.config.server.requestLogging
+      ? createGatewayLogger({
+          destination: loadedGatewayConfig.config.server.requestLoggingDestination,
+          logDir: options.logDir,
+        })
+      : undefined;
 
-  const app = await createGatewayServer(loadedGatewayConfig.config, {
-    fastify: options.fastify,
-    auth: gatewayModules.auth,
-    hooks: gatewayModules.hooks,
-    agentRegistry,
-    stores,
-    requestLogger,
-  });
-  let scheduler: SchedulerHandle | undefined;
-  let startScheduler: (() => void) | undefined;
+    validateRoutingReferences(loadedGatewayConfig.config, agentRegistry, loadedGatewayConfig.path);
 
-  if (loadedGatewayConfig.config.cron?.enabled) {
-    startScheduler = () => {
-      if (scheduler) {
+    const app = await createGatewayServer(loadedGatewayConfig.config, {
+      fastify: options.fastify,
+      auth: gatewayModules.auth,
+      hooks: gatewayModules.hooks,
+      agentRegistry,
+      stores,
+      requestLogger,
+      staleLeaseHeartbeatBefore: new Date(bootStartedAtMs),
+    });
+    let scheduler: SchedulerHandle | undefined;
+    let cronFileSync: CronFileSyncHandle | undefined;
+    let startScheduler: (() => void) | undefined;
+    let cronServicesStarting = false;
+    let loggedStarted = false;
+
+    const logGatewayStarted = () => {
+      if (loggedStarted) {
         return;
       }
 
-      scheduler = createSchedulerLoop({
-        gatewayConfig: loadedGatewayConfig.config,
-        agentRegistry,
-        stores,
-        logger: requestLogger,
-        leaseDurationMs:
-          loadedGatewayConfig.config.cron && loadedGatewayConfig.config.cron.schedulerLeaseMs > 0
-            ? loadedGatewayConfig.config.cron.schedulerLeaseMs
-            : undefined,
-        leaseOwner: options.scheduler?.leaseOwner,
-        now: options.scheduler?.now,
-        idFactory: options.scheduler?.idFactory,
-        onError: options.scheduler?.onError,
-        pollIntervalMs: options.scheduler?.pollIntervalMs,
+      loggedStarted = true;
+      const address = app.server.address();
+      const listenAddress = formatListenAddress(address);
+      requestLogger?.info(GATEWAY_LOG_EVENTS.gateway_started, 'Gateway server started', {
+        bootId,
+        pid: process.pid,
+        host: listenAddress.host ?? loadedGatewayConfig.config.server.host,
+        port: listenAddress.port ?? loadedGatewayConfig.config.server.port,
+        websocketPath: loadedGatewayConfig.config.server.websocketPath,
+        ...(loadedGatewayConfig.config.server.healthPath ? { healthPath: loadedGatewayConfig.config.server.healthPath } : {}),
+        storesKind: loadedGatewayConfig.config.stores?.kind ?? 'memory',
+        agentCount: loadedAgentConfigs.length,
+        cronEnabled: loadedGatewayConfig.config.cron?.enabled ?? false,
+        ...(options.logDir ? { logDir: options.logDir } : {}),
       });
+    };
+
+    app.server.on('listening', logGatewayStarted);
+
+    if (loadedGatewayConfig.config.cron?.enabled) {
+      startScheduler = () => {
+        if (scheduler) {
+          return;
+        }
+
+        void startCronServices().catch((error) => {
+          requestLogger?.warn(GATEWAY_LOG_EVENTS.cron_file_sync_failed, 'Cron startup sync failed', {
+            error: error instanceof Error ? error.message : 'Cron startup sync failed.',
+          });
+        });
+      };
+
+      app.server.on('listening', startScheduler);
+    }
+
+    async function startCronServices(): Promise<void> {
+      if (scheduler || cronServicesStarting) {
+        return;
+      }
+
+      cronServicesStarting = true;
+      const fileSyncOptions = resolveCronFileSyncOptions(loadedGatewayConfig);
+      try {
+        if (fileSyncOptions.enabled) {
+          cronFileSync = createCronFileSyncLoop({
+            dir: fileSyncOptions.dir,
+            stores,
+            logger: requestLogger,
+            intervalMs: fileSyncOptions.intervalMs,
+            now: options.scheduler?.now,
+          });
+          try {
+            await cronFileSync.tick();
+          } catch (error) {
+            requestLogger?.warn(GATEWAY_LOG_EVENTS.cron_file_sync_failed, 'Cron startup sync failed', {
+              dir: fileSyncOptions.dir,
+              error: error instanceof Error ? error.message : 'Cron startup sync failed.',
+            });
+          }
+        }
+
+        scheduler = createSchedulerLoop({
+          gatewayConfig: loadedGatewayConfig.config,
+          agentRegistry,
+          stores,
+          logger: requestLogger,
+          leaseDurationMs:
+            loadedGatewayConfig.config.cron && loadedGatewayConfig.config.cron.schedulerLeaseMs > 0
+              ? loadedGatewayConfig.config.cron.schedulerLeaseMs
+              : undefined,
+          leaseOwner: options.scheduler?.leaseOwner,
+          now: options.scheduler?.now,
+          idFactory: options.scheduler?.idFactory,
+          onError: options.scheduler?.onError,
+          pollIntervalMs: options.scheduler?.pollIntervalMs,
+        });
+      } finally {
+        cronServicesStarting = false;
+      }
 
       void scheduler.tick().catch(() => {
         // Startup should not fail just because an initial cron poll had a transient error.
       });
-    };
-
-    app.server.on('listening', startScheduler);
-  }
-
-  app.addHook('onClose', async () => {
-    scheduler?.stop();
-    scheduler = undefined;
-    if (startScheduler) {
-      app.server.off('listening', startScheduler);
     }
+
+    app.addHook('onClose', async () => {
+      requestLogger?.info(GATEWAY_LOG_EVENTS.gateway_stopping, 'Gateway server stopping', {
+        bootId,
+        pid: process.pid,
+      });
+      scheduler?.stop();
+      scheduler = undefined;
+      cronFileSync?.stop();
+      cronFileSync = undefined;
+      if (startScheduler) {
+        app.server.off('listening', startScheduler);
+      }
+      app.server.off('listening', logGatewayStarted);
+      agentRuntimeLogger?.flush?.();
+      requestLogger?.info(GATEWAY_LOG_EVENTS.gateway_stopped, 'Gateway server stopped', {
+        bootId,
+        pid: process.pid,
+        durationMs: Date.now() - bootStartedAtMs,
+      });
+      await requestLogger?.close();
+      await storeBundle?.close?.();
+    });
+
+    return {
+      app,
+      gatewayConfig: loadedGatewayConfig.config,
+      gatewayConfigPath: loadedGatewayConfig.path,
+      agentConfigs: loadedAgentConfigs,
+      agentRegistry,
+      gatewayModules,
+      stores,
+      runtimeStores: storeBundle.runtimeStores,
+      bootId,
+      get scheduler() {
+        return scheduler;
+      },
+    };
+  } catch (error) {
     agentRuntimeLogger?.flush?.();
     await requestLogger?.close();
-  });
+    await storeBundle?.close?.();
+    throw error;
+  }
+}
+
+function resolveCronFileSyncOptions(loadedGatewayConfig: LoadedConfig<GatewayConfig>): {
+  enabled: boolean;
+  dir: string;
+  intervalMs: number;
+} {
+  const storesKind = loadedGatewayConfig.config.stores?.kind ?? 'memory';
+  const fileSync = loadedGatewayConfig.config.cron?.fileSync;
+  const enabled = storesKind === 'postgres' && (fileSync?.enabled ?? true);
+  const defaultDir = resolve(dirname(loadedGatewayConfig.path), '..', 'data', 'gateway', 'cron-jobs');
 
   return {
-    app,
-    gatewayConfig: loadedGatewayConfig.config,
-    gatewayConfigPath: loadedGatewayConfig.path,
-    agentConfigs: loadedAgentConfigs,
-    agentRegistry,
-    gatewayModules,
-    stores,
-    get scheduler() {
-      return scheduler;
-    },
+    enabled,
+    dir: resolve(fileSync?.dir ?? defaultDir),
+    intervalMs: fileSync?.intervalMs ?? 60_000,
   };
 }
 
@@ -187,4 +311,18 @@ function validateRoutingReferences(gatewayConfig: GatewayConfig, agentRegistry: 
       );
     }
   }
+}
+
+function formatListenAddress(address: string | AddressInfo | null): {
+  host?: string;
+  port?: number;
+} {
+  if (!address || typeof address === 'string') {
+    return {};
+  }
+
+  return {
+    host: address.address,
+    port: address.port,
+  };
 }

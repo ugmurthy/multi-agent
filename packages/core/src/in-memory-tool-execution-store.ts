@@ -27,6 +27,16 @@ export class InMemoryToolExecutionStore implements ToolExecutionStore {
     return cloneRecord(startedRecord);
   }
 
+  async markChildRunLinked(idempotencyKey: string, childRunId: string): Promise<ToolExecutionRecord> {
+    const current = this.requireRecord(idempotencyKey);
+    const linkedRecord: ToolExecutionRecord = {
+      ...current,
+      childRunId,
+    };
+    this.recordsByKey.set(idempotencyKey, linkedRecord);
+    return cloneRecord(linkedRecord);
+  }
+
   async markCompleted(idempotencyKey: string, output: JsonValue): Promise<ToolExecutionRecord> {
     const current = this.requireRecord(idempotencyKey);
     const completedRecord: ToolExecutionRecord = {

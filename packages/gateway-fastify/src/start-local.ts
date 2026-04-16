@@ -15,7 +15,6 @@ import {
   GATEWAY_STORE_BASE_DIR,
 } from './local-dev.js';
 import { createLocalModuleRegistry } from './local-modules.js';
-import { createFileGatewayStores } from './stores-file.js';
 
 async function main(): Promise<void> {
   await mkdir(GATEWAY_STORE_BASE_DIR, { recursive: true });
@@ -36,7 +35,6 @@ async function main(): Promise<void> {
     agentConfigDir: AGENT_CONFIG_DIR,
     logDir,
     moduleRegistry,
-    stores: createFileGatewayStores({ baseDir: GATEWAY_STORE_BASE_DIR }),
   });
 
   console.log('AdaptiveAgent gateway is running.');
@@ -47,7 +45,7 @@ async function main(): Promise<void> {
   console.log(`- Gateway config: ${GATEWAY_CONFIG_PATH} (${gatewayConfigStatus})`);
   console.log(`- Agent config dir: ${AGENT_CONFIG_DIR}`);
   console.log(`- Default agent config: ${DEFAULT_AGENT_CONFIG_PATH} (${defaultAgentStatus})`);
-  console.log(`- File-backed gateway stores: ${GATEWAY_STORE_BASE_DIR}`);
+  console.log(`- Gateway stores: ${formatStoreMode(gateway.gatewayConfig)}`);
   console.log(`- Logs: ${logDir}`);
   console.log(`- Request logs: ${formatRequestLogDestination(gateway.gatewayConfig, logDir)}`);
   console.log(`- Runtime logs: ${formatRuntimeLogDestination(gateway.gatewayConfig, logDir)}`);
@@ -244,6 +242,20 @@ function formatRuntimeLogDestination(gatewayConfig: GatewayConfig, logDir: strin
     runtimeLogging.destination ?? 'file',
     runtimeLogging.filePath ?? join(logDir, 'agent-runtime.log'),
   );
+}
+
+function formatStoreMode(gatewayConfig: GatewayConfig): string {
+  const stores = gatewayConfig.stores;
+  if (stores?.kind === 'postgres') {
+    const source = stores.connectionString ? 'stores.connectionString' : stores.urlEnv ?? 'DATABASE_URL';
+    return `postgres (${source})`;
+  }
+
+  if (stores?.kind === 'file') {
+    return `file (${stores.baseDir})`;
+  }
+
+  return 'memory';
 }
 
 function formatLogDestination(destination: 'console' | 'file' | 'both', destinationPath: string): string {

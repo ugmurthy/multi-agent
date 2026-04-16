@@ -9,6 +9,9 @@ import { markedTerminal } from 'marked-terminal';
 import type { AgentEventFrame, OutboundFrame, SessionOpenedFrame, SessionUpdatedFrame } from './protocol.js';
 import { GATEWAY_CONFIG_PATH, loadLocalGatewayConnectionConfig } from './local-dev.js';
 import { mintLocalDevJwt } from './local-dev-jwt.js';
+import { formatCompactAgentEventFrame } from './local-event-format.js';
+
+export { formatCompactAgentEventFrame } from './local-event-format.js';
 
 marked.use(markedTerminal() as never);
 
@@ -157,7 +160,7 @@ async function main(): Promise<void> {
         break;
       case 'run.output':
         if (frame.status === 'failed') {
-          console.log(`run failed: ${frame.error ?? 'unknown error'}`);
+          console.log(`${shortRunId(frame.runId)} failed: ${frame.error ?? 'unknown error'}`);
           state.lastFailedRunId = frame.runId;
           if (frame.sessionId) {
             state.failedRunSessionIds.set(frame.runId, frame.sessionId);
@@ -766,88 +769,6 @@ function isEventsCommand(command: string): boolean {
   return command === '/event' || command.startsWith('/event ') || command === '/events' || command.startsWith('/events ');
 }
 
-export function formatCompactAgentEventFrame(frame: AgentEventFrame): string {
-  const payload = asRecord(frame.data);
-  const prefix = compactEventPrefix(frame);
-
-  switch (frame.eventType) {
-    case 'run.created':
-      return `${prefix} run created`;
-    case 'run.status_changed': {
-      const fromStatus = readString(payload, 'fromStatus') ?? 'unknown';
-      const toStatus = readString(payload, 'toStatus') ?? 'unknown';
-      return `${prefix} status ${fromStatus} -> ${toStatus}`;
-    }
-    case 'run.interrupted':
-      return `${prefix} run interrupted`;
-    case 'run.resumed':
-      return `${prefix} run resumed`;
-    case 'run.retry_started':
-      return `${prefix} retry started`;
-    case 'run.completed':
-      return `${prefix} run completed`;
-    case 'run.failed': {
-      const error = readString(payload, 'error');
-      return `${prefix} run failed${error ? `: ${error}` : ''}`;
-    }
-    case 'plan.created':
-      return `${prefix} plan created`;
-    case 'plan.execution_started':
-      return `${prefix} plan execution started`;
-    case 'step.started':
-      return `${prefix} step ${frame.stepId ?? readString(payload, 'stepId') ?? 'unknown'} started`;
-    case 'step.completed':
-      return `${prefix} step ${frame.stepId ?? readString(payload, 'stepId') ?? 'unknown'} completed`;
-    case 'tool.started':
-      return `${prefix} tool ${readString(payload, 'toolName') ?? 'unknown'} started`;
-    case 'tool.completed':
-      return `${prefix} tool ${readString(payload, 'toolName') ?? 'unknown'} completed`;
-    case 'tool.failed': {
-      const toolName = readString(payload, 'toolName') ?? 'unknown';
-      const error = readString(payload, 'error');
-      return `${prefix} tool ${toolName} failed${error ? `: ${error}` : ''}`;
-    }
-    case 'delegate.spawned': {
-      const delegateName = readString(payload, 'delegateName') ?? 'unknown';
-      const childRunId = readString(payload, 'childRunId');
-      return `${prefix} delegate.${delegateName} spawned ${childRunId ? shortRunId(childRunId) : 'child run'}`;
-    }
-    case 'approval.requested':
-      return `${prefix} approval requested for ${readString(payload, 'toolName') ?? 'unknown'}`;
-    case 'approval.resolved': {
-      const toolName = readString(payload, 'toolName');
-      const approved = payload.approved === true ? 'approved' : payload.approved === false ? 'rejected' : 'resolved';
-      return `${prefix} approval ${approved}${toolName ? ` for ${toolName}` : ''}`;
-    }
-    case 'clarification.requested': {
-      const message = readString(payload, 'message');
-      return `${prefix} clarification requested${message ? `: ${message}` : ''}`;
-    }
-    case 'usage.updated': {
-      const usage = asRecord(payload.usage);
-      const promptTokens = readNumber(usage, 'promptTokens');
-      const completionTokens = readNumber(usage, 'completionTokens');
-      const totalTokens = readNumber(usage, 'totalTokens');
-      const parts = [
-        promptTokens === undefined ? undefined : `prompt=${promptTokens}`,
-        completionTokens === undefined ? undefined : `completion=${completionTokens}`,
-        totalTokens === undefined ? undefined : `total=${totalTokens}`,
-      ].filter((part): part is string => part !== undefined);
-      return `${prefix} usage updated${parts.length > 0 ? ` (${parts.join(', ')})` : ''}`;
-    }
-    case 'snapshot.created': {
-      const status = readString(payload, 'status');
-      return `${prefix} snapshot created${status ? ` (${status})` : ''}`;
-    }
-    case 'replan.required': {
-      const reason = readString(payload, 'reason') ?? readString(payload, 'replanReason');
-      return `${prefix} replan required${reason ? `: ${reason}` : ''}`;
-    }
-    default:
-      return `${prefix} ${frame.eventType}`;
-  }
-}
-
 function formatVerboseAgentEventFrame(frame: AgentEventFrame): string {
   const correlation = [
     frame.sessionId ? `session=${frame.sessionId}` : undefined,
@@ -869,32 +790,6 @@ function formatVerboseAgentEventFrame(frame: AgentEventFrame): string {
   }
 
   return `${prefix} data=${formattedData}`;
-}
-
-function compactEventPrefix(frame: AgentEventFrame): string {
-  const runPrefix = frame.runId ? shortRunId(frame.runId) : 'run:unknown';
-  const seq = frame.seq ?? '?';
-  const time = frame.createdAt ? formatEventTime(frame.createdAt) : '--:--:--';
-  return `[${time}] ${runPrefix} #${seq}`;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function readString(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function readNumber(record: Record<string, unknown>, key: string): number | undefined {
-  const value = record[key];
-  return typeof value === 'number' ? value : undefined;
-}
-
-function formatEventTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toISOString().slice(11, 19);
 }
 
 function shortRunId(runId: string): string {

@@ -339,8 +339,15 @@ export const GATEWAY_LOG_EVENTS = {
   cron_dispatched: 'cron.dispatched',
   cron_completed: 'cron.completed',
   cron_failed: 'cron.failed',
+  cron_file_imported: 'cron.file.imported',
+  cron_file_updated: 'cron.file.updated',
+  cron_file_sync_completed: 'cron.file_sync.completed',
+  cron_file_sync_failed: 'cron.file_sync.failed',
   protocol_error: 'protocol.error',
   health_changed: 'health.changed',
+  gateway_started: 'gateway.server.started',
+  gateway_stopping: 'gateway.server.stopping',
+  gateway_stopped: 'gateway.server.stopped',
 } as const;
 
 export type GatewayLogEvent = (typeof GATEWAY_LOG_EVENTS)[keyof typeof GATEWAY_LOG_EVENTS];

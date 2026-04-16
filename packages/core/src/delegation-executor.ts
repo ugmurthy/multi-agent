@@ -24,6 +24,7 @@ import type {
   SnapshotStore,
   ToolContext,
   ToolDefinition,
+  ToolExecutionStore,
   UUID,
 } from './types.js';
 
@@ -91,6 +92,7 @@ export interface DelegationExecutorOptions {
   downstreamEventSink?: EventSink;
   logger?: Logger;
   snapshotStore?: SnapshotStore;
+  toolExecutionStore?: ToolExecutionStore;
   transactionStore?: RuntimeTransactionStore;
   executeChildRun(request: ExecuteChildRunRequest): Promise<RunResult>;
 }
@@ -191,6 +193,7 @@ export class DelegationExecutor {
     await parentContext.emit({
       runId: parentContext.runId,
       stepId: parentContext.stepId,
+      toolCallId: parentContext.toolCallId,
       type: 'tool.started',
       schemaVersion: 1,
       payload: {
@@ -261,6 +264,7 @@ export class DelegationExecutor {
       parentRunId: parentContext.runId,
       childRunId,
       stepId: parentContext.stepId,
+      toolCallId: parentContext.toolCallId,
       delegateName: delegate.name,
       toolName,
     });
@@ -403,6 +407,7 @@ export class DelegationExecutor {
     parentRunId: UUID;
     childRunId: UUID;
     stepId?: string;
+    toolCallId?: string;
     delegateName: string;
     toolName: string;
   }): Promise<Extract<ParentResumeResult, { kind: 'resolved' | 'failed' }>> {
@@ -421,6 +426,7 @@ export class DelegationExecutor {
       const parentToolEvent = this.parentToolResolutionEvent({
         parentRunId: parentRun.id,
         stepId: params.stepId,
+        toolCallId: params.toolCallId,
         delegateName: params.delegateName,
         toolName: params.toolName,
         childRunId: params.childRunId,
@@ -525,6 +531,8 @@ export class DelegationExecutor {
           parentRun.version,
         );
 
+        await stores.toolExecutionStore?.markChildRunLinked(params.parentContext.idempotencyKey, params.childRunId);
+
         const statusChangedEvent = this.runStatusChangedEvent(
           parentRun,
           params.parentContext.stepId,
@@ -577,6 +585,8 @@ export class DelegationExecutor {
       },
       parentRun.version,
     );
+
+    await this.options.toolExecutionStore?.markChildRunLinked(params.parentContext.idempotencyKey, params.childRunId);
 
     await this.emitRunEvent(
       this.runStatusChangedEvent(parentRun, params.parentContext.stepId, 'awaiting_subagent', params.childRunId),
@@ -844,6 +854,7 @@ export class DelegationExecutor {
   private parentToolResolutionEvent(params: {
     parentRunId: UUID;
     stepId?: string;
+    toolCallId?: string;
     delegateName: string;
     toolName: string;
     childRunId: UUID;
@@ -855,6 +866,7 @@ export class DelegationExecutor {
       return {
         runId: params.parentRunId,
         stepId: params.stepId,
+        toolCallId: params.toolCallId,
         type: 'tool.completed',
         schemaVersion: 1,
         payload: {
@@ -869,6 +881,7 @@ export class DelegationExecutor {
     return {
       runId: params.parentRunId,
       stepId: params.stepId,
+      toolCallId: params.toolCallId,
       type: 'tool.failed',
       schemaVersion: 1,
       payload: {

@@ -12,6 +12,7 @@
     "gateway:client:web": "bun --cwd ./packages/gateway-client-web run dev",
     "gateway:client:web:build": "bun --cwd ./packages/gateway-client-web run build",
     "gateway:client:web:check": "bun --cwd ./packages/gateway-client-web run check",
+    "gateway:logs:analyze": "bun run ./packages/gateway-fastify/src/analyze-logs.ts",
     "gateway:mint-jwt": "bun run ./packages/gateway-fastify/src/mint-local-jwt.ts",
     "gateway:start": "bun run ./packages/gateway-fastify/src/start-local.ts"
   },

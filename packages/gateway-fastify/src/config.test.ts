@@ -39,6 +39,11 @@ describe('gateway config loading', () => {
             requestLogging: true,
             requestLoggingDestination: 'file',
           },
+          stores: {
+            kind: 'postgres',
+            urlEnv: 'DATABASE_URL',
+            ssl: false,
+          },
           agentRuntimeLogging: {
             enabled: true,
             level: 'debug',
@@ -55,6 +60,16 @@ describe('gateway config loading', () => {
             summaryTriggerWindow: 4,
             summaryMaxMessages: 8,
             summaryLineMaxLength: 120,
+          },
+          cron: {
+            enabled: true,
+            schedulerLeaseMs: 60_000,
+            maxConcurrentJobs: 2,
+            fileSync: {
+              enabled: true,
+              dir: 'data/gateway/cron-jobs',
+              intervalMs: 30_000,
+            },
           },
           channels: {
             defaults: {
@@ -124,8 +139,25 @@ describe('gateway config loading', () => {
       summaryMaxMessages: 8,
       summaryLineMaxLength: 120,
     });
+    expect(loadedGatewayConfig.config.cron).toEqual({
+      enabled: true,
+      schedulerLeaseMs: 60_000,
+      maxConcurrentJobs: 2,
+      fileSync: {
+        enabled: true,
+        dir: 'data/gateway/cron-jobs',
+        intervalMs: 30_000,
+      },
+    });
     expect(loadedGatewayConfig.config.server.requestLogging).toBe(true);
     expect(loadedGatewayConfig.config.server.requestLoggingDestination).toBe('file');
+    expect(loadedGatewayConfig.config.stores).toEqual({
+      kind: 'postgres',
+      urlEnv: 'DATABASE_URL',
+      ssl: false,
+      autoMigrate: undefined,
+      connectionString: undefined,
+    });
     expect(loadedGatewayConfig.config.agentRuntimeLogging).toEqual({
       enabled: true,
       level: 'debug',
@@ -164,6 +196,43 @@ describe('gateway config loading', () => {
     await expect(loadGatewayConfig({ configPath: gatewayConfigPath })).rejects.toThrowError(
       /server.host must be a non-empty string[\s\S]*server.port must be a positive integer[\s\S]*server.websocketPath must start with "\/"/,
     );
+  });
+
+  it('defaults cron file sync to enabled when the object is present', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+          },
+          cron: {
+            enabled: true,
+            schedulerLeaseMs: 60_000,
+            maxConcurrentJobs: 1,
+            fileSync: {
+              dir: 'data/gateway/cron-jobs',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const loadedGatewayConfig = await loadGatewayConfig({ configPath: gatewayConfigPath });
+
+    expect(loadedGatewayConfig.config.cron?.fileSync).toEqual({
+      enabled: true,
+      dir: 'data/gateway/cron-jobs',
+      intervalMs: 60_000,
+    });
   });
 
   it('reports actionable agent validation errors', async () => {

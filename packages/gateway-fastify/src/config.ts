@@ -27,6 +27,7 @@ const REQUEST_LOG_DESTINATIONS = ['console', 'file', 'both'] as const;
 const AGENT_RUNTIME_LOG_DESTINATIONS = ['console', 'file', 'both'] as const satisfies readonly AdaptiveAgentLogDestination[];
 const AGENT_RUNTIME_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'] as const satisfies readonly AdaptiveAgentLogLevel[];
 const MODEL_PROVIDERS: ModelAdapterConfig['provider'][] = ['openrouter', 'ollama', 'mistral', 'mesh'];
+const GATEWAY_STORE_KINDS = ['memory', 'file', 'postgres'] as const;
 
 export type InvocationMode = (typeof INVOCATION_MODES)[number];
 export type HookFailurePolicy = (typeof HOOK_FAILURE_POLICIES)[number];
@@ -52,10 +53,28 @@ export interface GatewayAuthConfig {
   settings: JsonObject;
 }
 
+export type GatewayStoreConfig =
+  | { kind: 'memory' }
+  | { kind: 'file'; baseDir: string }
+  | {
+      kind: 'postgres';
+      urlEnv?: string;
+      connectionString?: string;
+      ssl?: boolean;
+      autoMigrate?: boolean;
+    };
+
 export interface GatewayCronConfig {
   enabled: boolean;
   schedulerLeaseMs: number;
   maxConcurrentJobs: number;
+  fileSync?: GatewayCronFileSyncConfig;
+}
+
+export interface GatewayCronFileSyncConfig {
+  enabled: boolean;
+  dir?: string;
+  intervalMs: number;
 }
 
 export interface GatewayTranscriptConfig {
@@ -105,6 +124,7 @@ export interface GatewayHooksConfig {
 
 export interface GatewayConfig {
   server: GatewayServerConfig;
+  stores?: GatewayStoreConfig;
   agentRuntimeLogging?: GatewayAgentRuntimeLoggingConfig;
   auth?: GatewayAuthConfig;
   cron?: GatewayCronConfig;
@@ -226,6 +246,7 @@ function validateGatewayConfig(value: unknown, sourcePath: string): GatewayConfi
   const root = expectObject(value, 'gateway', issues);
 
   const server = parseGatewayServerConfig(root?.server, 'server', issues);
+  const stores = parseGatewayStoreConfig(root?.stores, 'stores', issues);
   const agentRuntimeLogging = parseGatewayAgentRuntimeLoggingConfig(
     root?.agentRuntimeLogging,
     'agentRuntimeLogging',
@@ -260,6 +281,7 @@ function validateGatewayConfig(value: unknown, sourcePath: string): GatewayConfi
 
   return {
     server,
+    stores,
     agentRuntimeLogging,
     auth,
     cron,
@@ -268,6 +290,37 @@ function validateGatewayConfig(value: unknown, sourcePath: string): GatewayConfi
     bindings,
     defaultAgentId,
     hooks,
+  };
+}
+
+function parseGatewayStoreConfig(value: unknown, path: string, issues: string[]): GatewayStoreConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const stores = expectObject(value, path, issues);
+  const kind = expectEnum(stores?.kind, GATEWAY_STORE_KINDS, `${path}.kind`, issues);
+  if (!kind) {
+    return undefined;
+  }
+
+  if (kind === 'memory') {
+    return { kind };
+  }
+
+  if (kind === 'file') {
+    return {
+      kind,
+      baseDir: expectNonEmptyString(stores?.baseDir, `${path}.baseDir`, issues) ?? 'invalid-store-base-dir',
+    };
+  }
+
+  return {
+    kind,
+    urlEnv: expectOptionalNonEmptyString(stores?.urlEnv, `${path}.urlEnv`, issues),
+    connectionString: expectOptionalNonEmptyString(stores?.connectionString, `${path}.connectionString`, issues),
+    ssl: expectOptionalBoolean(stores?.ssl, `${path}.ssl`, issues),
+    autoMigrate: expectOptionalBoolean(stores?.autoMigrate, `${path}.autoMigrate`, issues),
   };
 }
 
@@ -427,6 +480,25 @@ function parseGatewayCronConfig(value: unknown, path: string, issues: string[]):
     enabled: expectBoolean(cron?.enabled, `${path}.enabled`, issues) ?? false,
     schedulerLeaseMs: expectPositiveInteger(cron?.schedulerLeaseMs, `${path}.schedulerLeaseMs`, issues) ?? 0,
     maxConcurrentJobs: expectPositiveInteger(cron?.maxConcurrentJobs, `${path}.maxConcurrentJobs`, issues) ?? 0,
+    fileSync: parseGatewayCronFileSyncConfig(cron?.fileSync, `${path}.fileSync`, issues),
+  };
+}
+
+function parseGatewayCronFileSyncConfig(
+  value: unknown,
+  path: string,
+  issues: string[],
+): GatewayCronFileSyncConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const fileSync = expectObject(value, path, issues);
+
+  return {
+    enabled: expectOptionalBoolean(fileSync?.enabled, `${path}.enabled`, issues) ?? true,
+    dir: expectOptionalNonEmptyString(fileSync?.dir, `${path}.dir`, issues),
+    intervalMs: expectOptionalPositiveInteger(fileSync?.intervalMs, `${path}.intervalMs`, issues) ?? 60_000,
   };
 }
 

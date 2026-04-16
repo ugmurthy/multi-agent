@@ -20,6 +20,7 @@ import {
 } from './tui/index.js';
 import {
   getInteractiveSessionMode,
+  formatCompactAgentEventFrame,
   parseClarifyCommand,
   parseEventsCommand,
   parseRetryCommand,
@@ -143,62 +144,11 @@ function requireValue(flag: string, value: string | undefined): string {
   throw new Error(`Missing value for ${flag}.`);
 }
 
-function formatCompactAgentEventFrame(frame: AgentEventFrame, options: { includeSeq?: boolean } = {}): string {
-  const payload = asRecord(frame.data);
-  const runPrefix = frame.runId ? `run:${frame.runId.slice(0, 8)}` : 'run:unknown';
-  const seq = frame.seq ?? '?';
-  const prefix = options.includeSeq === false ? runPrefix : `[${seq}] ${runPrefix}`;
-
-  switch (frame.eventType) {
-    case 'run.created':
-      return `${prefix} run created`;
-    case 'run.status_changed': {
-      const fromStatus = readString(payload, 'fromStatus') ?? 'unknown';
-      const toStatus = readString(payload, 'toStatus') ?? 'unknown';
-      return `${prefix} status ${fromStatus} -> ${toStatus}`;
-    }
-    case 'run.interrupted':
-      return `${prefix} run interrupted`;
-    case 'run.resumed':
-      return `${prefix} run resumed`;
-    case 'run.retry_started':
-      return `${prefix} retry started`;
-    case 'run.completed':
-      return `${prefix} run completed`;
-    case 'run.failed': {
-      const error = readString(payload, 'error');
-      return `${prefix} run failed${error ? `: ${error}` : ''}`;
-    }
-    case 'tool.started':
-      return `${prefix} tool ${readString(payload, 'toolName') ?? 'unknown'} started`;
-    case 'tool.completed':
-      return `${prefix} tool ${readString(payload, 'toolName') ?? 'unknown'} completed`;
-    case 'tool.failed': {
-      const toolName = readString(payload, 'toolName') ?? 'unknown';
-      const error = readString(payload, 'error');
-      return `${prefix} tool ${toolName} failed${error ? `: ${error}` : ''}`;
-    }
-    case 'approval.requested':
-      return `${prefix} approval requested for ${readString(payload, 'toolName') ?? 'unknown'}`;
-    case 'approval.resolved': {
-      const toolName = readString(payload, 'toolName');
-      const approved = payload.approved === true ? 'approved' : payload.approved === false ? 'rejected' : 'resolved';
-      return `${prefix} approval ${approved}${toolName ? ` for ${toolName}` : ''}`;
-    }
-    case 'clarification.requested': {
-      const message = readString(payload, 'message');
-      return `${prefix} clarification requested${message ? `: ${message}` : ''}`;
-    }
-    default:
-      return `${prefix} ${frame.eventType}`;
-  }
-}
-
 function recordLiveAgentEvent(state: TuiClientState, frame: AgentEventFrame): void {
   const payload = asRecord(frame.data);
   const status = readString(payload, 'toStatus') ?? readString(payload, 'status');
   const toolName = readString(payload, 'toolName');
-  const error = readString(payload, 'error');
+  const error = readFailureText(payload);
   const message = readString(payload, 'message');
 
   state.latestAgentEvent = {
@@ -220,6 +170,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 function readString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function readFailureText(record: Record<string, unknown>): string | undefined {
+  return readString(record, 'error') ?? readString(record, 'reason') ?? readString(record, 'message');
+}
+
+function shortRunId(runId: string): string {
+  return `run:${runId.slice(0, 8)}`;
 }
 
 function formatRunOutput(output: unknown): string {
@@ -626,7 +584,7 @@ async function runTuiMode(
           }
           messageLog.addMessage({
             type: 'system',
-            content: `run failed: ${frame.error ?? 'unknown error'}`,
+            content: `${shortRunId(frame.runId)} failed: ${frame.error ?? 'unknown error'}`,
             timestamp: new Date(),
           });
           if (state.pendingClarificationRunId === frame.runId) {
@@ -704,7 +662,7 @@ async function runTuiMode(
         }
         messageLog.addMessage({
           type: 'event',
-          content: formatCompactAgentEventFrame(frame),
+          content: formatCompactAgentEventFrame(frame, { prefixStyle: 'seq' }),
           timestamp: new Date(),
         });
         tui.requestRender();

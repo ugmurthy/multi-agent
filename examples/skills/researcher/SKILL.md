@@ -4,6 +4,7 @@ description: Research a topic using web search and page reading, then return str
 allowedTools:
   - web_search
   - read_web_page
+defaults.maxSteps: 60
 ---
 
 # Researcher

@@ -26,6 +26,7 @@ export interface RestoreActiveSessionOptions {
   agentRegistry?: AgentRegistry;
   authContext?: GatewayAuthContext;
   now?: () => Date;
+  staleLeaseHeartbeatBefore?: Date;
 }
 
 export type ReconnectRuntimePolicy =
@@ -88,6 +89,7 @@ export async function restoreActiveSession(
       stores: options.stores,
       now,
       nowIso,
+      staleLeaseHeartbeatBefore: options.staleLeaseHeartbeatBefore,
     });
     updatedSession = recovery.session;
     policy = recovery.policy;
@@ -215,6 +217,7 @@ async function recoverRuntimeState(
     stores: GatewayStores;
     now: Date;
     nowIso: string;
+    staleLeaseHeartbeatBefore?: Date;
   },
 ): Promise<{
   session: GatewaySessionRecord;
@@ -295,11 +298,16 @@ async function recoverRuntimeState(
     };
   }
 
-  if (isActiveRuntimeStatus(run.status) && isLeaseExpired(run, options.now)) {
+  if (isActiveRuntimeStatus(run.status) && shouldResumeActiveRun(run, options.now, options.staleLeaseHeartbeatBefore)) {
     if (!agent.agent.resume) {
       return { session, policy: 'resume_unavailable' };
     }
 
+    await prepareLeaseForReconnectResume(agent.runtime.runStore, run, {
+      now: options.now,
+      nowIso: options.nowIso,
+      staleLeaseHeartbeatBefore: options.staleLeaseHeartbeatBefore,
+    });
     const resumedResult = await agent.agent.resume(activeRunId);
     const recoveryFrame = runResultToRecoveryFrame(resumedResult, rootRunId, session.id);
     const resumedSession = await updateSessionForRunResult(options.stores, session, resumedResult, rootRunId, options.nowIso);
@@ -512,4 +520,81 @@ function isLeaseExpired(run: RuntimeRunRecord, now: Date): boolean {
   }
 
   return new Date(run.leaseExpiresAt).getTime() <= now.getTime();
+}
+
+function shouldResumeActiveRun(run: RuntimeRunRecord, now: Date, staleLeaseHeartbeatBefore: Date | undefined): boolean {
+  if (isLeaseExpired(run, now)) {
+    return true;
+  }
+
+  if (!staleLeaseHeartbeatBefore || !run.heartbeatAt) {
+    return false;
+  }
+
+  return new Date(run.heartbeatAt).getTime() < staleLeaseHeartbeatBefore.getTime();
+}
+
+async function prepareLeaseForReconnectResume(
+  runStore: {
+    getRun(runId: string): Promise<RuntimeRunRecord | null>;
+    updateRun?: (runId: string, patch: Partial<RuntimeRunRecord>, expectedVersion?: number) => Promise<RuntimeRunRecord>;
+  },
+  run: RuntimeRunRecord,
+  options: {
+    now: Date;
+    nowIso: string;
+    staleLeaseHeartbeatBefore?: Date;
+  },
+): Promise<void> {
+  if (!isLeaseExpired(run, options.now)) {
+    assertCanClearLeaseForReconnectResume(runStore, run.id);
+    await clearRunLeaseForReconnectResume(runStore, run, options.nowIso);
+  }
+
+  if (run.status !== 'awaiting_subagent' || !run.currentChildRunId) {
+    return;
+  }
+
+  const childRun = await runStore.getRun(run.currentChildRunId);
+  if (!childRun || isTerminalRuntimeStatus(childRun.status)) {
+    return;
+  }
+
+  if (!shouldResumeActiveRun(childRun, options.now, options.staleLeaseHeartbeatBefore)) {
+    return;
+  }
+
+  if (!isLeaseExpired(childRun, options.now)) {
+    assertCanClearLeaseForReconnectResume(runStore, childRun.id);
+    await clearRunLeaseForReconnectResume(runStore, childRun, options.nowIso);
+  }
+}
+
+function assertCanClearLeaseForReconnectResume(
+  runStore: {
+    updateRun?: (runId: string, patch: Partial<RuntimeRunRecord>, expectedVersion?: number) => Promise<RuntimeRunRecord>;
+  },
+  runId: string,
+): void {
+  if (!runStore.updateRun) {
+    throw new Error(`Run ${runId} has a stale active lease but the runtime store cannot clear leases before reconnect resume.`);
+  }
+}
+
+async function clearRunLeaseForReconnectResume(
+  runStore: {
+    updateRun?: (runId: string, patch: Partial<RuntimeRunRecord>, expectedVersion?: number) => Promise<RuntimeRunRecord>;
+  },
+  run: RuntimeRunRecord,
+  nowIso: string,
+): Promise<void> {
+  await runStore.updateRun!(
+    run.id,
+    {
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      heartbeatAt: undefined,
+    },
+    run.version,
+  );
 }

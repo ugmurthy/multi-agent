@@ -16,6 +16,9 @@ bun test
 
 # Typecheck
 bun run typecheck
+
+# Run Docker-backed Postgres restart integration tests
+bun run test:postgres-integration
 ```
 
 ## Local Development
@@ -24,11 +27,11 @@ bun run typecheck
 
 The gateway supports three storage backends:
 
-| Backend    | Use case        | Factory                                      |
-| ---------- | --------------- | -------------------------------------------- |
-| In-memory  | Tests, prototyping | `createInMemoryGatewayStores()`            |
-| File-backed | Local dev       | `createFileGatewayStores({ baseDir })`      |
-| PostgreSQL | Production      | `createPostgresSessionStores({ client })` + `createPostgresCronStores({ client })` |
+| Backend | Use case | Config / Factory |
+| ------- | -------- | ---------------- |
+| In-memory | Tests, prototyping | `stores.kind: "memory"` or `createInMemoryGatewayStores()` |
+| File-backed | Local dev | `stores.kind: "file"` or `createFileGatewayStores({ baseDir })` |
+| PostgreSQL | Restart-safe gateway + runtime durability | `stores.kind: "postgres"` or `bootstrapGateway({ postgresClient })` |
 
 ```ts
 import { bootstrapGateway, createFileGatewayStores } from '@adaptive-agent/gateway-fastify';
@@ -41,6 +44,39 @@ const gw = await bootstrapGateway({
   stores: createFileGatewayStores({ baseDir: './data/gateway' }),
 });
 ```
+
+`memory` is convenient, but it is not restart-safe. A gateway restart loses sessions, transcripts, session-run links, cron state, and all core runtime run state.
+
+`file` only makes the gateway-owned stores durable. It preserves sessions and transcripts, but it does not make core runtime state durable, so completed run outputs, retry snapshots, leases, and resumability still disappear on restart.
+
+Use `postgres` when you need reconnect, retry, resume, and terminal run replay to survive a gateway restart.
+
+### PostgreSQL Setup
+
+Configure the gateway with a Postgres-backed store bundle:
+
+```json
+{
+  "stores": {
+    "kind": "postgres",
+    "urlEnv": "DATABASE_URL",
+    "ssl": false
+  }
+}
+```
+
+You can also inline a connection string with `stores.connectionString`, but `DATABASE_URL` is the normal path.
+
+When `stores.kind` is `postgres`, `bootstrapGateway()` applies the packaged migrations by default before constructing stores:
+
+- `packages/gateway-fastify/migrations/001_gateway_postgres.sql`
+- `packages/core/migrations/001_runtime_postgres.sql`
+
+Those migrations create both the gateway-owned tables and the core runtime durability tables. Set `stores.autoMigrate: false` if you want to manage those SQL files externally.
+
+If you provide a custom `agentFactory` while using `stores.kind: "postgres"`, the bootstrap path passes the shared durable runtime bundle on `entry.runtime`. The custom factory must use that runtime bundle if you want restart-safe run recovery.
+
+For an end-to-end restart check against a real Docker Postgres instance, run `bun run test:postgres-integration` from `packages/gateway-fastify`.
 
 ### Starting the Server
 
@@ -124,6 +160,11 @@ File: `config/gateway.json`
     "requestLogging": true,
     "requestLoggingDestination": "both"
   },
+  "stores": {
+    "kind": "postgres",
+    "urlEnv": "DATABASE_URL",
+    "ssl": false
+  },
   "agentRuntimeLogging": {
     "enabled": true,
     "level": "info",
@@ -189,6 +230,12 @@ File: `config/gateway.json`
 | `server.healthPath` | No | HTTP health endpoint path |
 | `server.requestLogging` | No | Enable structured HTTP request logs, summarized WebSocket frame logs, and scheduler cron lifecycle logs |
 | `server.requestLoggingDestination` | No | Request log sink: `console`, `file`, or `both`; defaults to `console` when request logging is enabled |
+| `stores.kind` | No | Storage backend: `memory`, `file`, or `postgres`; defaults to `memory` |
+| `stores.baseDir` | No | Required when `stores.kind` is `file` |
+| `stores.urlEnv` | No | Environment variable to read for the Postgres connection string; defaults to `DATABASE_URL` |
+| `stores.connectionString` | No | Inline Postgres connection string override |
+| `stores.ssl` | No | Enable Postgres SSL client mode |
+| `stores.autoMigrate` | No | Disable bootstrap auto-migration when `false` |
 | `agentRuntimeLogging.enabled` | No | Pass a core AdaptiveAgent logger into runtime agent instances |
 | `agentRuntimeLogging.level` | No | Runtime log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, or `silent`; defaults to `info` when enabled |
 | `agentRuntimeLogging.destination` | No | Runtime log sink: `console`, `file`, or `both`; defaults to `file` when enabled |
@@ -211,6 +258,8 @@ File: `config/gateway.json`
 When `server.requestLoggingDestination` is `file` or `both`, the gateway writes newline-delimited JSON logs to `data/gateway/logs/gateway-YYYY-MM-DD.log` relative to the current working directory by default. The local `gateway:start` launcher writes these logs under `~/.adaptiveAgent/data/gateway/logs`.
 
 When `agentRuntimeLogging.destination` is `file` or `both`, the gateway passes `data/gateway/logs/agent-runtime.log` to the core AdaptiveAgent logger by default. The local `gateway:start` launcher uses `~/.adaptiveAgent/data/gateway/logs/agent-runtime.log`. The core logger applies its date and numbered rotation convention, so the resulting files are named `agent-runtime-YYYY-MM-DD.log`, `agent-runtime-YYYY-MM-DD-2.log`, and so on.
+
+`stores.kind: "postgres"` is the only built-in mode that makes both gateway state and core runtime state durable across restarts. `stores.kind: "file"` is still useful for local single-node development, but it is not full run recovery.
 
 ---
 
@@ -522,6 +571,33 @@ Tracked counters: `sessionsCreated`, `sessionsReattached`, `activeRuns`, `chatTu
 ### Structured Logs
 
 All operational events are emitted as JSON log entries with `level`, `event`, `message`, `timestamp`, and optional `data`. Event categories cover auth, sessions, routing, chat, runs, approvals, hooks, cron, and protocol errors.
+
+### Log Analysis
+
+Use the Bun-native analyzer to summarize gateway and agent runtime logs:
+
+```bash
+bun run logs:analyze
+bun run logs:analyze --since 1h
+bun run logs:analyze --session-id sess-123
+bun run logs:analyze --run-id run-123
+bun run logs:analyze --details
+bun run logs:analyze --watch
+```
+
+From the repository root:
+
+```bash
+bun run gateway:logs:analyze --since 1h
+```
+
+By default, the analyzer reads `~/.adaptiveAgent/data/gateway/logs` and combines `gateway-YYYY-MM-DD.log` with rotated `agent-runtime-YYYY-MM-DD.log` files. Use `--dir <path>` or repeated `--file <path>` flags for copied logs or CI artifacts.
+
+The default report is compact: window, files, activity totals, failure summary, repeated patterns, and the top insights. Add `--details` for full sections and timelines. Add `--session-id`, `--run-id`, or `--root-run-id` to investigate one conversation or run chain; focused investigations automatically include the detailed timeline. Add `--json` for machine-readable output.
+
+Human-readable times are rendered in local timezone as `HH:MM:SS`. Use `--timezone Asia/Kolkata` or another IANA timezone to override display timezone.
+
+When request logging is enabled, the gateway emits explicit lifecycle events: `gateway.server.started`, `gateway.server.stopping`, and `gateway.server.stopped`. Each includes a `bootId`, `pid`, and server metadata. The analyzer uses only these lifecycle events to report server starts/stops and session outcomes within each boot window; it does not infer restarts from quiet log gaps.
 
 ---
 

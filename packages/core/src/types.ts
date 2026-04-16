@@ -211,6 +211,7 @@ export interface ToolContext {
   delegateName?: string;
   delegationDepth: number;
   stepId: string;
+  toolCallId: string;
   planId?: UUID;
   planExecutionId?: UUID;
   input?: JsonValue;
@@ -379,6 +380,7 @@ export interface AgentEvent {
   seq: number;
   type: EventType;
   stepId?: string;
+  toolCallId?: string;
   schemaVersion: number;
   payload: JsonValue;
   createdAt: string;
@@ -411,6 +413,8 @@ export interface ToolExecutionRecord {
   idempotencyKey: string;
   status: ToolExecutionStatus;
   inputHash: string;
+  input?: JsonValue;
+  childRunId?: UUID;
   output?: JsonValue;
   errorCode?: string;
   errorMessage?: string;
@@ -427,7 +431,9 @@ export interface ToolExecutionStore {
     toolName: string;
     idempotencyKey: string;
     inputHash: string;
+    input?: JsonValue;
   }): Promise<ToolExecutionRecord>;
+  markChildRunLinked(idempotencyKey: string, childRunId: UUID): Promise<ToolExecutionRecord>;
   markCompleted(idempotencyKey: string, output: JsonValue): Promise<ToolExecutionRecord>;
   markFailed(idempotencyKey: string, errorCode: string, errorMessage: string): Promise<ToolExecutionRecord>;
 }
