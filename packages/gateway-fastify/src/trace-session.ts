@@ -457,7 +457,7 @@ export function renderTraceReport(report: TraceReport, options: Pick<CliOptions,
   }
 
   lines.push('');
-  lines.push(chalk.bold('Delegate Diagnostics'));
+  lines.push(markdownBlock('# Delegate Diagnostics'));
   lines.push(renderDelegates(report.delegates));
 
   if (options.includePlans) {
@@ -471,7 +471,7 @@ export function renderTraceReport(report: TraceReport, options: Pick<CliOptions,
   lines.push(renderFinalOutput(report.rootRuns));
 
   lines.push('');
-  lines.push(chalk.bold('Final Summary'));
+  lines.push(markdownBlock('# Final Summary'));
   lines.push(`${statusColor(report.summary.status)(report.summary.status)}: ${report.summary.reason}`);
   return lines.join('\n');
 }
@@ -1071,7 +1071,6 @@ function renderTimeline(entries: TimelineEntry[]): string {
 
   const rows = entries.map((entry) => [
     formatTime(entry.startedAt),
-    formatTime(entry.completedAt),
     formatDuration(entry.durationMs),
     `${shortId(entry.rootRunId)}/${shortId(entry.runId)} d${entry.depth}`,
     entry.stepId ?? '-',
@@ -1079,7 +1078,7 @@ function renderTimeline(entries: TimelineEntry[]): string {
     compactValue(entry.params),
     statusColor(entry.outcome)(entry.outcome),
   ]);
-  return renderTable(['started', 'completed', 'duration', 'run/depth', 'step', 'tool', 'params', 'outcome'], rows);
+  return renderTable(['started', 'duration', 'run/depth', 'step', 'tool', 'params', 'outcome'], rows);
 }
 
 function renderDelegates(delegates: DelegateRow[]): string {
