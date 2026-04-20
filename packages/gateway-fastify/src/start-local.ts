@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 import type { AgentConfig, GatewayConfig, LoadedConfig } from './config.js';
 import { startGateway } from './bootstrap.js';
-import { loadAgentConfigs } from './config.js';
+import { loadAgentConfigs, resolveGatewayRequestLogLevel } from './config.js';
 import {
   AGENT_CONFIG_DIR,
   DEFAULT_AGENT_CONFIG_PATH,
@@ -44,7 +44,8 @@ async function main(): Promise<void> {
   }
   console.log(`- Gateway config: ${GATEWAY_CONFIG_PATH} (${gatewayConfigStatus})`);
   console.log(`- Agent config dir: ${AGENT_CONFIG_DIR}`);
-  console.log(`- Default agent config: ${DEFAULT_AGENT_CONFIG_PATH} (${defaultAgentStatus})`);
+  console.log(`- Configured default agent: ${formatConfiguredDefaultAgent(gateway.gatewayConfig, gateway.agentConfigs)}`);
+  console.log(`- Conventional default-agent config: ${DEFAULT_AGENT_CONFIG_PATH} (${defaultAgentStatus})`);
   console.log(`- Gateway stores: ${formatStoreMode(gateway.gatewayConfig)}`);
   console.log(`- Logs: ${logDir}`);
   console.log(`- Request logs: ${formatRequestLogDestination(gateway.gatewayConfig, logDir)}`);
@@ -164,7 +165,7 @@ function createGatewayConfig(gatewayJwtSecret: string): Record<string, unknown> 
       port: 8959,
       websocketPath: '/ws',
       healthPath: '/health',
-      requestLogging: true,
+      requestLogging: 'info',
     },
     agentRuntimeLogging: {
       enabled: false,
@@ -224,12 +225,30 @@ function formatDetectedAgents(loadedAgentConfigs: Array<LoadedConfig<AgentConfig
     .sort();
 }
 
+function formatConfiguredDefaultAgent(
+  gatewayConfig: GatewayConfig,
+  loadedAgentConfigs: Array<LoadedConfig<AgentConfig>>,
+): string {
+  if (!gatewayConfig.defaultAgentId) {
+    return '(none)';
+  }
+
+  const matchedAgent = loadedAgentConfigs.find((loadedAgentConfig) => loadedAgentConfig.config.id === gatewayConfig.defaultAgentId);
+  if (!matchedAgent) {
+    return `${gatewayConfig.defaultAgentId} (configured, but no matching agent config loaded)`;
+  }
+
+  return `${matchedAgent.config.id} (${matchedAgent.config.name}) - ${matchedAgent.path}`;
+}
+
 function formatRequestLogDestination(gatewayConfig: GatewayConfig, logDir: string): string {
-  if (!gatewayConfig.server.requestLogging) {
+  const requestLogLevel = resolveGatewayRequestLogLevel(gatewayConfig.server.requestLogging);
+  if (!requestLogLevel) {
     return 'disabled';
   }
 
-  return formatLogDestination(gatewayConfig.server.requestLoggingDestination ?? 'console', logDir);
+  const destination = formatLogDestination(gatewayConfig.server.requestLoggingDestination ?? 'console', logDir);
+  return `${requestLogLevel} (${destination})`;
 }
 
 function formatRuntimeLogDestination(gatewayConfig: GatewayConfig, logDir: string): string {

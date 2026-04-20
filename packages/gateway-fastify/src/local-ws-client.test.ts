@@ -13,6 +13,12 @@ import {
 } from './local-ws-client.js';
 
 describe('selectInteractiveSession', () => {
+  it('waits to open a chat session until chat traffic actually starts', () => {
+    expect(selectInteractiveSession('chat', {})).toEqual({
+      shouldOpenSession: true,
+    });
+  });
+
   it('keeps chat traffic on the primary session', () => {
     expect(selectInteractiveSession('chat', { sessionId: 'chat-1' })).toEqual({
       sessionId: 'chat-1',

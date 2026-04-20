@@ -24,15 +24,19 @@ const INVOCATION_MODES = ['chat', 'run'] as const;
 const CAPTURE_MODES = ['full', 'summary', 'none'] as const;
 const HOOK_FAILURE_POLICIES = ['fail', 'warn', 'ignore'] as const;
 const REQUEST_LOG_DESTINATIONS = ['console', 'file', 'both'] as const;
+const REQUEST_LOG_LEVELS = ['debug', 'info', 'warn', 'silent'] as const;
 const AGENT_RUNTIME_LOG_DESTINATIONS = ['console', 'file', 'both'] as const satisfies readonly AdaptiveAgentLogDestination[];
 const AGENT_RUNTIME_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'] as const satisfies readonly AdaptiveAgentLogLevel[];
 const MODEL_PROVIDERS: ModelAdapterConfig['provider'][] = ['openrouter', 'ollama', 'mistral', 'mesh'];
 const GATEWAY_STORE_KINDS = ['memory', 'file', 'postgres'] as const;
+const RESEARCH_POLICIES = ['none', 'light', 'standard', 'deep'] as const;
+const TOOL_BUDGET_EXHAUSTED_ACTIONS = ['fail', 'continue_with_warning', 'ask_model'] as const;
 
 export type InvocationMode = (typeof INVOCATION_MODES)[number];
 export type HookFailurePolicy = (typeof HOOK_FAILURE_POLICIES)[number];
 export type GatewayHookSlot = (typeof GATEWAY_HOOK_SLOTS)[number];
 export type GatewayRequestLoggingDestination = (typeof REQUEST_LOG_DESTINATIONS)[number];
+export type GatewayRequestLogLevel = (typeof REQUEST_LOG_LEVELS)[number];
 
 export interface LoadedConfig<TConfig> {
   path: string;
@@ -44,7 +48,7 @@ export interface GatewayServerConfig {
   port: number;
   websocketPath: string;
   healthPath?: string;
-  requestLogging?: boolean;
+  requestLogging?: boolean | GatewayRequestLogLevel;
   requestLoggingDestination?: GatewayRequestLoggingDestination;
 }
 
@@ -390,12 +394,47 @@ function parseGatewayServerConfig(value: unknown, path: string, issues: string[]
     port: expectPositiveInteger(server?.port, `${path}.port`, issues) ?? 0,
     websocketPath: expectHttpPath(server?.websocketPath, `${path}.websocketPath`, issues) ?? '/ws',
     healthPath: expectOptionalHttpPath(server?.healthPath, `${path}.healthPath`, issues),
-    requestLogging: expectOptionalBoolean(server?.requestLogging, `${path}.requestLogging`, issues),
+    requestLogging: parseGatewayRequestLoggingValue(server?.requestLogging, `${path}.requestLogging`, issues),
     requestLoggingDestination:
       server?.requestLoggingDestination === undefined
         ? undefined
         : expectEnum(server.requestLoggingDestination, REQUEST_LOG_DESTINATIONS, `${path}.requestLoggingDestination`, issues),
   };
+}
+
+function parseGatewayRequestLoggingValue(
+  value: unknown,
+  path: string,
+  issues: string[],
+): boolean | GatewayRequestLogLevel | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return expectEnum(value, REQUEST_LOG_LEVELS, path, issues);
+  }
+
+  issues.push(`${path} must be a boolean or one of: ${REQUEST_LOG_LEVELS.map((entry) => `"${entry}"`).join(', ')}.`);
+  return undefined;
+}
+
+export function resolveGatewayRequestLogLevel(
+  requestLogging: boolean | GatewayRequestLogLevel | undefined,
+): GatewayRequestLogLevel | undefined {
+  if (requestLogging === undefined || requestLogging === false || requestLogging === 'silent') {
+    return undefined;
+  }
+
+  if (requestLogging === true) {
+    return 'info';
+  }
+
+  return requestLogging;
 }
 
 function parseGatewayAgentRuntimeLoggingConfig(
@@ -735,7 +774,80 @@ function parseAgentDefaults(value: unknown, path: string, issues: string[]): Par
     }
   }
 
+  if (defaults?.researchPolicy !== undefined) {
+    const researchPolicy = parseResearchPolicy(defaults.researchPolicy, `${path}.researchPolicy`, issues);
+    if (researchPolicy !== undefined) {
+      parsedDefaults.researchPolicy = researchPolicy;
+    }
+  }
+
+  if (defaults?.toolBudgets !== undefined) {
+    const toolBudgets = parseToolBudgets(defaults.toolBudgets, `${path}.toolBudgets`, issues);
+    if (toolBudgets !== undefined) {
+      parsedDefaults.toolBudgets = toolBudgets;
+    }
+  }
+
   return Object.keys(parsedDefaults).length > 0 ? parsedDefaults : {};
+}
+
+function parseResearchPolicy(value: unknown, path: string, issues: string[]): AgentDefaults['researchPolicy'] | undefined {
+  if (typeof value === 'string') {
+    return expectEnum(value, RESEARCH_POLICIES, path, issues);
+  }
+
+  const policy = expectObject(value, path, issues);
+  if (!policy) {
+    return undefined;
+  }
+
+  const mode = expectEnum(policy.mode, RESEARCH_POLICIES, `${path}.mode`, issues);
+  if (!mode) {
+    return undefined;
+  }
+
+  return {
+    mode,
+    maxSearches: expectOptionalNonNegativeInteger(policy.maxSearches, `${path}.maxSearches`, issues),
+    maxPagesRead: expectOptionalNonNegativeInteger(policy.maxPagesRead, `${path}.maxPagesRead`, issues),
+    checkpointAfter: expectOptionalNonNegativeInteger(policy.checkpointAfter, `${path}.checkpointAfter`, issues),
+    requirePurpose: expectOptionalBoolean(policy.requirePurpose, `${path}.requirePurpose`, issues),
+  };
+}
+
+function parseToolBudgets(value: unknown, path: string, issues: string[]): NonNullable<AgentDefaults['toolBudgets']> | undefined {
+  const rawBudgets = expectObject(value, path, issues);
+  if (!rawBudgets) {
+    return undefined;
+  }
+
+  const parsedBudgets: NonNullable<AgentDefaults['toolBudgets']> = {};
+  for (const [groupName, rawBudget] of Object.entries(rawBudgets)) {
+    const budget = expectObject(rawBudget, `${path}.${groupName}`, issues);
+    if (!budget) {
+      continue;
+    }
+
+    parsedBudgets[groupName] = {
+      maxCalls: expectOptionalNonNegativeInteger(budget.maxCalls, `${path}.${groupName}.maxCalls`, issues),
+      maxConsecutiveCalls: expectOptionalNonNegativeInteger(
+        budget.maxConsecutiveCalls,
+        `${path}.${groupName}.maxConsecutiveCalls`,
+        issues,
+      ),
+      checkpointAfter: expectOptionalNonNegativeInteger(
+        budget.checkpointAfter,
+        `${path}.${groupName}.checkpointAfter`,
+        issues,
+      ),
+      onExhausted:
+        budget.onExhausted === undefined
+          ? undefined
+          : expectEnum(budget.onExhausted, TOOL_BUDGET_EXHAUSTED_ACTIONS, `${path}.${groupName}.onExhausted`, issues),
+    };
+  }
+
+  return parsedBudgets;
 }
 
 function parseAgentRoutingConfig(value: unknown, path: string, issues: string[]): AgentRoutingConfig | undefined {
@@ -802,6 +914,19 @@ function expectOptionalPositiveInteger(value: unknown, path: string, issues: str
   }
 
   return expectPositiveInteger(value, path, issues);
+}
+
+function expectOptionalNonNegativeInteger(value: unknown, path: string, issues: string[]): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  issues.push(`${path} must be a non-negative integer.`);
+  return undefined;
 }
 
 function expectNonEmptyString(value: unknown, path: string, issues: string[]): string | undefined {

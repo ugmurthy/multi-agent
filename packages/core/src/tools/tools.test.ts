@@ -271,6 +271,7 @@ describe('createWebSearchTool', () => {
 
   it('sends a Brave Search request and parses results', async () => {
     const tool = createWebSearchTool({ apiKey: 'brave-key' });
+    expect(tool.budgetGroup).toBe('web_research.search');
 
     fetchSpy.mockResolvedValueOnce(
       new Response(
@@ -481,6 +482,41 @@ describe('createWebSearchTool', () => {
     });
   });
 
+  it('accepts optional purpose metadata on web_search input', async () => {
+    const tool = createWebSearchTool({ apiKey: 'key' });
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          web: {
+            results: [{ title: 'A', url: 'https://a.com', description: 'a' }],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const result = (await tool.execute(
+      {
+        query: 'test',
+        purpose: 'verify a claim',
+        expectedUse: 'verify',
+        freshnessRequired: true,
+      } as any,
+      stubToolContext(),
+    )) as any;
+
+    expect(result).toMatchObject({
+      query: 'test',
+      purpose: 'verify a claim',
+      expectedUse: 'verify',
+      freshnessRequired: true,
+      researchStatus: {
+        status: 'complete',
+      },
+    });
+  });
+
   it('has correct tool metadata', () => {
     const tool = createWebSearchTool({ apiKey: 'key' });
     expect(tool.name).toBe('web_search');
@@ -504,6 +540,7 @@ describe('createReadWebPageTool', () => {
 
   it('fetches a page and extracts title and text', async () => {
     const tool = createReadWebPageTool();
+    expect(tool.budgetGroup).toBe('web_research.read');
 
     const html = `
       <html>

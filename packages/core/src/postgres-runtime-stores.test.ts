@@ -58,6 +58,9 @@ const sampleRunRow = {
   goal: 'Write a report',
   input: { topic: 'resumability' },
   context: { locale: 'en-US' },
+  model_provider: 'mesh',
+  model_name: 'openai/gpt-4o',
+  model_parameters: { temperature: 0.2, reasoningEffort: 'medium' },
   metadata: { requestId: 'req-1' },
   status: 'running',
   current_step_id: 'step-1',
@@ -204,6 +207,9 @@ describe('PostgresRunStore', () => {
       goal: 'Write a report',
       input: { topic: 'resumability' },
       context: { locale: 'en-US' },
+      modelProvider: 'mesh',
+      modelName: 'openai/gpt-4o',
+      modelParameters: { temperature: 0.2, reasoningEffort: 'medium' },
       metadata: { requestId: 'req-1' },
       status: 'running',
     });
@@ -213,6 +219,9 @@ describe('PostgresRunStore', () => {
       rootRunId: 'run-1',
       goal: 'Write a report',
       status: 'running',
+      modelProvider: 'mesh',
+      modelName: 'openai/gpt-4o',
+      modelParameters: { temperature: 0.2, reasoningEffort: 'medium' },
       usage: {
         promptTokens: 10,
         completionTokens: 5,
@@ -223,7 +232,16 @@ describe('PostgresRunStore', () => {
     });
     expect(client.query).toHaveBeenCalledWith(
       POSTGRES_RUNTIME_RUN_QUERIES.create,
-      expect.arrayContaining(['run-1', 'run-1', null, null, null]),
+      expect.arrayContaining([
+        'run-1',
+        'run-1',
+        null,
+        null,
+        null,
+        'mesh',
+        'openai/gpt-4o',
+        JSON.stringify({ temperature: 0.2, reasoningEffort: 'medium' }),
+      ]),
     );
   });
 

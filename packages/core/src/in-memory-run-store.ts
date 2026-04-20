@@ -81,6 +81,9 @@ export class InMemoryRunStore implements RunStore {
       goal: run.goal,
       input: run.input,
       context: run.context,
+      modelProvider: run.modelProvider,
+      modelName: run.modelName,
+      modelParameters: run.modelParameters,
       status: run.status,
       version: 0,
       usage: emptyUsage(),
@@ -139,6 +142,18 @@ export class InMemoryRunStore implements RunStore {
 
     if (patch.delegationDepth !== undefined && patch.delegationDepth !== current.delegationDepth) {
       throw new Error('delegationDepth is immutable');
+    }
+
+    if (patch.modelProvider && patch.modelProvider !== current.modelProvider) {
+      throw new Error('modelProvider is immutable');
+    }
+
+    if (patch.modelName && patch.modelName !== current.modelName) {
+      throw new Error('modelName is immutable');
+    }
+
+    if (patch.modelParameters && JSON.stringify(patch.modelParameters) !== JSON.stringify(current.modelParameters)) {
+      throw new Error('modelParameters is immutable');
     }
 
     if (patch.currentChildRunId && !this.runs.has(patch.currentChildRunId)) {

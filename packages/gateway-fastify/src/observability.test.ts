@@ -151,7 +151,10 @@ describe('createGatewayLogger', () => {
 
   it('supports all log levels', () => {
     const entries: GatewayLogEntry[] = [];
-    const logger = createGatewayLogger((entry) => entries.push(entry));
+    const logger = createGatewayLogger({
+      sink: (entry) => entries.push(entry),
+      level: 'debug',
+    });
 
     logger.debug('test.debug', 'debug msg');
     logger.info('test.info', 'info msg');
@@ -159,6 +162,36 @@ describe('createGatewayLogger', () => {
     logger.error('test.error', 'error msg');
 
     expect(entries.map((e) => e.level)).toEqual(['debug', 'info', 'warn', 'error']);
+  });
+
+  it('filters logs below the configured request log level', () => {
+    const entries: GatewayLogEntry[] = [];
+    const logger = createGatewayLogger({
+      sink: (entry) => entries.push(entry),
+      level: 'warn',
+    });
+
+    logger.debug('test.debug', 'debug msg');
+    logger.info('test.info', 'info msg');
+    logger.warn('test.warn', 'warn msg');
+    logger.error('test.error', 'error msg');
+
+    expect(entries.map((entry) => entry.level)).toEqual(['warn', 'error']);
+  });
+
+  it('suppresses all logs when configured as silent', () => {
+    const entries: GatewayLogEntry[] = [];
+    const logger = createGatewayLogger({
+      sink: (entry) => entries.push(entry),
+      level: 'silent',
+    });
+
+    logger.debug('test.debug', 'debug msg');
+    logger.info('test.info', 'info msg');
+    logger.warn('test.warn', 'warn msg');
+    logger.error('test.error', 'error msg');
+
+    expect(entries).toEqual([]);
   });
 
   it('logs without data when not provided', () => {

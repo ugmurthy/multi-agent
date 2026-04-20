@@ -1,6 +1,7 @@
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+import type { GatewayRequestLogLevel } from './config.js';
 import type { JsonObject } from './core.js';
 
 export type GatewayHealthState = 'healthy' | 'startup_failed' | 'degraded';
@@ -59,6 +60,7 @@ export type GatewayLogSink = (entry: GatewayLogEntry) => void;
 export interface CreateGatewayLoggerOptions {
   sink?: GatewayLogSink;
   destination?: GatewayLogDestination;
+  level?: GatewayRequestLogLevel;
   logDir?: string;
   now?: () => Date;
 }
@@ -174,6 +176,7 @@ export function createGatewayMetrics(): GatewayMetrics {
 
 export function createGatewayLogger(options: GatewayLogSink | CreateGatewayLoggerOptions = {}): GatewayLogger {
   const resolvedOptions = typeof options === 'function' ? { sink: options } : options;
+  const minimumLevel = resolvedOptions.level ?? 'info';
   const { sink: logSink, close } = resolvedOptions.sink
     ? {
         sink: resolvedOptions.sink,
@@ -182,6 +185,10 @@ export function createGatewayLogger(options: GatewayLogSink | CreateGatewayLogge
     : createGatewayLogSink(resolvedOptions);
 
   function log(level: GatewayLogLevel, event: string, message: string, data?: JsonObject): void {
+    if (!shouldEmitGatewayLog(level, minimumLevel)) {
+      return;
+    }
+
     logSink({
       level,
       event,
@@ -198,6 +205,23 @@ export function createGatewayLogger(options: GatewayLogSink | CreateGatewayLogge
     error: (event, message, data) => log('error', event, message, data),
     close,
   };
+}
+
+function shouldEmitGatewayLog(level: GatewayLogLevel, minimumLevel: GatewayRequestLogLevel): boolean {
+  const severity: Record<GatewayLogLevel, number> = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40,
+  };
+  const threshold: Record<GatewayRequestLogLevel, number> = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    silent: Number.POSITIVE_INFINITY,
+  };
+
+  return severity[level] >= threshold[minimumLevel];
 }
 
 function createGatewayLogSink(options: CreateGatewayLoggerOptions): {

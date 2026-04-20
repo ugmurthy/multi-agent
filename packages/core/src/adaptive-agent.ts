@@ -9,6 +9,7 @@ import {
   summarizeModelResponseForLog,
 } from './logging.js';
 import { captureValueForLog, errorForLog, summarizeValueForLog } from './logger.js';
+import { resolveResearchPolicy, resolveToolBudgets, type ResolvedResearchPolicy } from './tool-budget-policy.js';
 import type {
   AdaptiveAgentOptions,
   AgentEvent,
@@ -24,6 +25,7 @@ import type {
   JsonSchema,
   JsonValue,
   ModelMessage,
+  ModelToolCall,
   ModelResponse,
   PlanCondition,
   PlanExecution,
@@ -35,6 +37,7 @@ import type {
   RunResult,
   RunSnapshot,
   RunStatus,
+  ToolBudget,
   ToolContext,
   ToolDefinition,
   UsageSummary,
@@ -67,6 +70,14 @@ interface ExecutionState {
   pendingToolCalls: PendingToolCallState[];
   approvedToolCallIds: string[];
   waitingOnChildRunId?: UUID;
+  toolBudgetUsage: Record<string, ToolBudgetUsage>;
+  pendingRuntimeMessages: ModelMessage[];
+}
+
+interface ToolBudgetUsage {
+  calls: number;
+  consecutiveCalls: number;
+  checkpointEmitted: boolean;
 }
 
 interface RunContinuationOptions {
@@ -98,6 +109,8 @@ const CHAT_GOAL_MAX_LENGTH = 120;
 
 export class AdaptiveAgent {
   private readonly toolRegistry = new Map<string, ToolDefinition>();
+  private readonly resolvedToolBudgets?: Record<string, ToolBudget>;
+  private readonly resolvedResearchPolicy?: ResolvedResearchPolicy;
   private readonly defaults: {
     maxSteps: number;
     toolTimeoutMs: number;
@@ -118,6 +131,8 @@ export class AdaptiveAgent {
       maxRetriesPerStep: options.defaults?.maxRetriesPerStep ?? DEFAULT_AGENT_DEFAULTS.maxRetriesPerStep,
     };
     this.defaultCaptureMode = options.defaults?.capture ?? 'summary';
+    this.resolvedResearchPolicy = resolveResearchPolicy(options.defaults?.researchPolicy);
+    this.resolvedToolBudgets = resolveToolBudgets(options.defaults);
     this.logger = options.logger?.child({
       component: 'adaptive-agent',
       provider: options.model.provider,
@@ -152,6 +167,8 @@ export class AdaptiveAgent {
       toolNames: Array.from(this.toolRegistry.keys()),
       delegateNames: (options.delegates ?? []).map((delegate) => delegate.name),
       defaults: this.defaults,
+      toolBudgets: this.resolvedToolBudgets,
+      researchPolicy: this.resolvedResearchPolicy,
     });
   }
 
@@ -219,6 +236,8 @@ export class AdaptiveAgent {
       goal: plan.goal,
       input: request.input,
       context: request.context,
+      modelProvider: this.options.model.provider,
+      modelName: this.options.model.model,
       metadata: mergeMetadata(plan.metadata, request.metadata),
       status: 'queued',
     });
@@ -725,7 +744,7 @@ export class AdaptiveAgent {
 
       if (currentRun.status === 'awaiting_subagent') {
         try {
-          currentRun = await this.resumeAwaitingParent(currentRun, state);
+          currentRun = await this.resumeAwaitingParent(currentRun, state, true);
         } catch (error) {
           if (error instanceof DelegationError) {
             return this.failRun(currentRun, state, error.message, error.code);
@@ -999,6 +1018,7 @@ export class AdaptiveAgent {
 
       let response: ModelResponse;
       try {
+        this.flushPendingRuntimeMessages(state);
         response = await this.generateModelResponse(currentRun, state);
       } catch (error) {
         currentRun = await this.refreshRun(currentRun.id);
@@ -1039,6 +1059,7 @@ export class AdaptiveAgent {
       }
 
       const output = response.structuredOutput ?? response.text ?? null;
+      resetBudgetConsecutiveCalls(state.toolBudgetUsage);
       state.stepsUsed += 1;
 
       this.logLifecycle('debug', 'step.completed', {
@@ -1184,8 +1205,11 @@ export class AdaptiveAgent {
     state.approvedToolCallIds = removeApprovedToolCallId(state.approvedToolCallIds, pendingToolCall.id);
 
     const toolContext = this.createToolContext(run, pendingToolCall.stepId, pendingToolCall.id);
+    const budgetGroup = this.resolveBudgetGroup(tool);
+    const budget = budgetGroup ? this.resolvedToolBudgets?.[budgetGroup] : undefined;
     const existingExecution = await this.options.toolExecutionStore?.getByIdempotencyKey(toolContext.idempotencyKey);
     if (existingExecution?.status === 'completed') {
+      this.onToolExecutionAdmitted(run, state, budgetGroup, budget);
       this.logLifecycle('info', 'tool.execution_reused', {
         ...runLogBindings(run),
         stepId: pendingToolCall.stepId,
@@ -1194,6 +1218,52 @@ export class AdaptiveAgent {
       });
       return {
         output: existingExecution.output ?? null,
+      };
+    }
+
+    const budgetAdmission = this.admitBudgetedToolCall(run, state, tool, pendingToolCall.input, budgetGroup, budget);
+    if (!budgetAdmission.admitted) {
+      await this.options.toolExecutionStore?.markStarted({
+        runId: run.id,
+        stepId: pendingToolCall.stepId,
+        toolCallId: pendingToolCall.id,
+        toolName: tool.name,
+        idempotencyKey: toolContext.idempotencyKey,
+        inputHash: stableJsonFingerprint(pendingToolCall.input),
+        input: pendingToolCall.input,
+      });
+
+      const eventInput = captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode);
+      const budgetOutput = budgetAdmission.output;
+
+      this.logLifecycle('warn', 'tool.budget_exhausted', {
+        ...runLogBindings(run),
+        stepId: pendingToolCall.stepId,
+        toolName: tool.name,
+        budgetGroup,
+        output: captureValueForLog(budgetOutput, { mode: 'summary' }),
+      });
+
+      return {
+        output: budgetOutput,
+        completion: {
+          idempotencyKey: toolContext.idempotencyKey,
+          output: budgetOutput,
+          event: {
+            runId: run.id,
+            stepId: pendingToolCall.stepId,
+            toolCallId: pendingToolCall.id,
+            type: 'tool.completed',
+            schemaVersion: 1,
+            payload: {
+              toolName: tool.name,
+              ...(eventInput === undefined ? {} : { input: eventInput }),
+              output: budgetOutput,
+              ...(budgetGroup === undefined ? {} : { budgetGroup }),
+              skipped: true,
+            },
+          },
+        },
       };
     }
 
@@ -1206,6 +1276,8 @@ export class AdaptiveAgent {
       inputHash: stableJsonFingerprint(pendingToolCall.input),
       input: pendingToolCall.input,
     });
+
+    this.onToolExecutionAdmitted(run, state, budgetGroup, budget);
 
     const emitsToolLifecycle = tool.name.startsWith(RESERVED_DELEGATE_PREFIX);
     const toolStartedAt = Date.now();
@@ -1483,8 +1555,135 @@ export class AdaptiveAgent {
       stepsUsed: 0,
       pendingToolCalls: [],
       approvedToolCallIds: [],
+      toolBudgetUsage: {},
+      pendingRuntimeMessages: [],
       outputSchema,
     };
+  }
+
+  private flushPendingRuntimeMessages(state: ExecutionState): void {
+    if (state.pendingRuntimeMessages.length === 0) {
+      return;
+    }
+
+    state.messages.push(...state.pendingRuntimeMessages);
+    state.pendingRuntimeMessages = [];
+  }
+
+  private enqueueRuntimeSystemMessage(
+    run: AgentRun,
+    state: ExecutionState,
+    source: 'research_policy.require_purpose' | 'tool_budget.checkpoint',
+    content: string,
+  ): void {
+    state.pendingRuntimeMessages.push({
+      role: 'system',
+      content,
+    });
+    this.logInjectedSystemMessage(run, source, content, 'pendingRuntimeMessages', run.currentStepId);
+  }
+
+  private logInitialInjectedSystemMessages(run: AgentRun, state: ExecutionState): void {
+    const initialPrompt = state.messages[0];
+    if (initialPrompt?.role === 'system' && typeof initialPrompt.content === 'string') {
+      this.logInjectedSystemMessage(run, 'initial_prompt', initialPrompt.content, 'messages', run.currentStepId);
+    }
+
+    const additionalContext = state.messages[1];
+    if (
+      additionalContext?.role === 'system' &&
+      typeof additionalContext.content === 'string' &&
+      additionalContext.content.startsWith('## Additional Context\n\n')
+    ) {
+      this.logInjectedSystemMessage(run, 'chat_context', additionalContext.content, 'messages', run.currentStepId);
+    }
+  }
+
+  private resolveBudgetGroup(tool: ToolDefinition): string | undefined {
+    if (tool.budgetGroup && this.resolvedToolBudgets?.[tool.budgetGroup]) {
+      return tool.budgetGroup;
+    }
+
+    if (this.resolvedToolBudgets?.[tool.name]) {
+      return tool.name;
+    }
+
+    return tool.budgetGroup;
+  }
+
+  private admitBudgetedToolCall(
+    run: AgentRun,
+    state: ExecutionState,
+    tool: ToolDefinition,
+    input: JsonValue,
+    budgetGroup: string | undefined,
+    budget: ToolBudget | undefined,
+  ): { admitted: true } | { admitted: false; output: JsonObject } {
+    if (!budgetGroup || !budget) {
+      return { admitted: true };
+    }
+
+    const usage = state.toolBudgetUsage[budgetGroup] ?? emptyToolBudgetUsage();
+    const maxCalls = normalizeBudgetLimit(budget.maxCalls);
+    if (maxCalls !== undefined && usage.calls >= maxCalls) {
+      return {
+        admitted: false,
+        output: createBudgetExhaustedToolOutput(tool.name, budgetGroup, budget.onExhausted),
+      };
+    }
+
+    const maxConsecutiveCalls = normalizeBudgetLimit(budget.maxConsecutiveCalls);
+    if (maxConsecutiveCalls !== undefined && usage.consecutiveCalls >= maxConsecutiveCalls) {
+      return {
+        admitted: false,
+        output: createBudgetExhaustedToolOutput(tool.name, budgetGroup, budget.onExhausted),
+      };
+    }
+
+    if (
+      this.resolvedResearchPolicy?.requirePurpose &&
+      tool.name === 'web_search' &&
+      isMissingWebSearchPurpose(input)
+    ) {
+      this.enqueueRuntimeSystemMessage(
+        run,
+        state,
+        'research_policy.require_purpose',
+        'Future `web_search` calls should include a short `purpose` so research stays goal-directed.',
+      );
+    }
+
+    return { admitted: true };
+  }
+
+  private onToolExecutionAdmitted(
+    run: AgentRun,
+    state: ExecutionState,
+    budgetGroup: string | undefined,
+    budget: ToolBudget | undefined,
+  ): void {
+    if (!budgetGroup || !budget) {
+      resetBudgetConsecutiveCalls(state.toolBudgetUsage);
+      return;
+    }
+
+    resetBudgetConsecutiveCalls(state.toolBudgetUsage, budgetGroup);
+    const usage = state.toolBudgetUsage[budgetGroup] ?? emptyToolBudgetUsage();
+    usage.calls += 1;
+    usage.consecutiveCalls += 1;
+
+    const checkpointAfter = normalizeBudgetLimit(budget.checkpointAfter);
+    if (checkpointAfter !== undefined && !usage.checkpointEmitted && usage.calls >= checkpointAfter) {
+      usage.checkpointEmitted = true;
+      this.enqueueRuntimeSystemMessage(
+        run,
+        state,
+        'tool_budget.checkpoint',
+        'You are near the web research budget. Use current evidence if it is sufficient. Only call another web research tool if you can name the specific missing fact needed for the user\'s goal. If evidence is incomplete, say what is uncertain instead of continuing to search broadly.',
+      );
+    }
+
+    state.toolBudgetUsage[budgetGroup] = usage;
   }
 
   private createInitialExecutionState(run: AgentRun, outputSchema?: JsonSchema): ExecutionState {
@@ -1495,6 +1694,7 @@ export class AdaptiveAgent {
     runInput: Parameters<AdaptiveAgentOptions['runStore']['createRun']>[0],
     createState: (run: AgentRun) => ExecutionState,
   ): Promise<{ run: AgentRun; state: ExecutionState }> {
+    const persistedRunInput = this.withPersistedModelConfig(runInput);
     const transactionStore = this.options.transactionStore;
     if (transactionStore?.eventStore && transactionStore.snapshotStore) {
       const downstreamEvents: Array<Omit<AgentEvent, 'id' | 'seq' | 'createdAt'>> = [];
@@ -1503,8 +1703,9 @@ export class AdaptiveAgent {
           throw new Error('Transactional run creation requires eventStore and snapshotStore');
         }
 
-        const run = await stores.runStore.createRun(runInput);
+        const run = await stores.runStore.createRun(persistedRunInput);
         const state = createState(run);
+        this.logInitialInjectedSystemMessages(run, state);
         const createdEvent = this.runCreatedEvent(run);
         await stores.eventStore.append(createdEvent);
 
@@ -1534,8 +1735,9 @@ export class AdaptiveAgent {
       return result;
     }
 
-    const run = await this.options.runStore.createRun(runInput);
+    const run = await this.options.runStore.createRun(persistedRunInput);
     const state = createState(run);
+    this.logInitialInjectedSystemMessages(run, state);
     await this.emit(this.runCreatedEvent(run));
     await this.saveExecutionSnapshot(run, state, run.status);
     return { run, state };
@@ -1549,6 +1751,17 @@ export class AdaptiveAgent {
     }
 
     return parsed ?? this.createInitialExecutionState(run, outputSchema);
+  }
+
+  private withPersistedModelConfig(
+    runInput: Parameters<AdaptiveAgentOptions['runStore']['createRun']>[0],
+  ): Parameters<AdaptiveAgentOptions['runStore']['createRun']>[0] {
+    return {
+      ...runInput,
+      modelProvider: runInput.modelProvider ?? this.options.model.provider,
+      modelName: runInput.modelName ?? this.options.model.model,
+      modelParameters: runInput.modelParameters,
+    };
   }
 
   private async saveExecutionSnapshot(run: AgentRun, state: ExecutionState, status: RunStatus): Promise<void> {
@@ -2247,6 +2460,23 @@ export class AdaptiveAgent {
     return Date.now() - new Date(run.createdAt).getTime();
   }
 
+  private logInjectedSystemMessage(
+    run: AgentRun,
+    source: 'initial_prompt' | 'chat_context' | 'research_policy.require_purpose' | 'tool_budget.checkpoint',
+    content: string,
+    snapshotField: 'messages' | 'pendingRuntimeMessages',
+    stepId?: string,
+  ): void {
+    this.logLifecycle('info', 'system_message.injected', {
+      ...runLogBindings(run),
+      stepId,
+      source,
+      snapshotField,
+      snapshotStoreConfigured: Boolean(this.options.snapshotStore),
+      content: summarizeValueForLog(content),
+    });
+  }
+
   private logLifecycle(
     level: 'debug' | 'info' | 'warn' | 'error',
     event: string,
@@ -2443,6 +2673,14 @@ function serializeExecutionState(state: ExecutionState): JsonObject {
     serialized.waitingOnChildRunId = state.waitingOnChildRunId;
   }
 
+  if (Object.keys(state.toolBudgetUsage).length > 0) {
+    serialized.toolBudgetUsage = state.toolBudgetUsage as unknown as JsonValue;
+  }
+
+  if (state.pendingRuntimeMessages.length > 0) {
+    serialized.pendingRuntimeMessages = state.pendingRuntimeMessages as unknown as JsonValue;
+  }
+
   return serialized;
 }
 
@@ -2469,7 +2707,46 @@ function deserializeExecutionState(value: JsonValue): ExecutionState | null {
     pendingToolCalls,
     approvedToolCallIds: deserializeApprovedToolCallIds(value.approvedToolCallIds),
     waitingOnChildRunId: typeof value.waitingOnChildRunId === 'string' ? value.waitingOnChildRunId : undefined,
+    toolBudgetUsage: deserializeToolBudgetUsage(value.toolBudgetUsage),
+    pendingRuntimeMessages: deserializeModelMessages(value.pendingRuntimeMessages),
   };
+}
+
+function deserializeToolBudgetUsage(value: JsonValue | undefined): Record<string, ToolBudgetUsage> {
+  if (!isJsonObject(value)) {
+    return {};
+  }
+
+  const usage: Record<string, ToolBudgetUsage> = {};
+  for (const [groupName, entry] of Object.entries(value)) {
+    if (!isJsonObject(entry)) {
+      continue;
+    }
+
+    const calls = typeof entry.calls === 'number' ? entry.calls : 0;
+    const consecutiveCalls = typeof entry.consecutiveCalls === 'number' ? entry.consecutiveCalls : 0;
+    const checkpointEmitted = entry.checkpointEmitted === true;
+    usage[groupName] = {
+      calls,
+      consecutiveCalls,
+      checkpointEmitted,
+    };
+  }
+
+  return usage;
+}
+
+function deserializeModelMessages(value: JsonValue | undefined): ModelMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.reduce<ModelMessage[]>((messages, entry) => {
+    if (isModelMessage(entry)) {
+      messages.push(entry);
+    }
+    return messages;
+  }, []);
 }
 
 function serializePendingToolCall(pendingToolCall: PendingToolCallState): JsonObject {
@@ -2574,7 +2851,7 @@ function isModelToolCallArray(value: unknown): value is ModelMessage['toolCalls'
   return Array.isArray(value) && value.every(isModelToolCall);
 }
 
-function isModelToolCall(value: unknown): value is ModelMessage['toolCalls'][number] {
+function isModelToolCall(value: unknown): value is ModelToolCall {
   if (typeof value !== 'object' || value === null) {
     return false;
   }
@@ -2604,6 +2881,59 @@ function toolResultMessage(pendingToolCall: PendingToolCallState, output: JsonVa
     toolCallId: pendingToolCall.id,
     content: JSON.stringify(output),
   };
+}
+
+function emptyToolBudgetUsage(): ToolBudgetUsage {
+  return {
+    calls: 0,
+    consecutiveCalls: 0,
+    checkpointEmitted: false,
+  };
+}
+
+function normalizeBudgetLimit(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function resetBudgetConsecutiveCalls(
+  usageByGroup: Record<string, ToolBudgetUsage>,
+  activeGroup?: string,
+): void {
+  for (const [groupName, usage] of Object.entries(usageByGroup)) {
+    if (activeGroup && groupName === activeGroup) {
+      continue;
+    }
+
+    usage.consecutiveCalls = 0;
+  }
+}
+
+function createBudgetExhaustedToolOutput(
+  toolName: string,
+  budgetGroup: string,
+  action: ToolBudget['onExhausted'],
+): JsonObject {
+  const message =
+    action === 'continue_with_warning'
+      ? `The ${budgetGroup} budget is exhausted. Do not call ${toolName} again in this run.`
+      : `The ${budgetGroup} budget is exhausted. Answer from the current evidence or explain what remains uncertain instead of calling ${toolName} again.`;
+
+  return {
+    status: 'partial',
+    reason: 'budget_exhausted',
+    toolName,
+    budgetGroup,
+    message,
+  };
+}
+
+function isMissingWebSearchPurpose(input: JsonValue): boolean {
+  if (!isJsonObject(input)) {
+    return true;
+  }
+
+  const purpose = input.purpose;
+  return typeof purpose !== 'string' || purpose.trim().length === 0;
 }
 
 function mergeUsage(current: UsageSummary, delta: UsageSummary): UsageSummary {
@@ -2739,7 +3069,7 @@ function resolvePlanTemplateRaw(
 
   if (isJsonObject(template as JsonValue | undefined)) {
     const resolvedObject: JsonObject = {};
-    for (const [key, value] of Object.entries(template)) {
+    for (const [key, value] of Object.entries(template as Record<string, unknown>)) {
       resolvedObject[key] = resolvePlanTemplate(value, input, context, resolvedStepOutputs);
     }
 
@@ -2926,7 +3256,30 @@ function mergeDelegateDefaults(
   if (parentDefaults?.maxSteps !== undefined) {
     defaults.maxSteps = Math.max(parentDefaults.maxSteps, delegateDefaults?.maxSteps ?? parentDefaults.maxSteps);
   }
+  defaults.researchPolicy = parentDefaults?.researchPolicy ?? delegateDefaults?.researchPolicy;
+  defaults.toolBudgets = mergeDelegateToolBudgets(parentDefaults?.toolBudgets, delegateDefaults?.toolBudgets);
   return defaults;
+}
+
+function mergeDelegateToolBudgets(
+  parentBudgets: Record<string, ToolBudget> | undefined,
+  delegateBudgets: Record<string, ToolBudget> | undefined,
+): Record<string, ToolBudget> | undefined {
+  if (!parentBudgets && !delegateBudgets) {
+    return undefined;
+  }
+
+  const merged: Record<string, ToolBudget> = {
+    ...(parentBudgets ?? {}),
+  };
+
+  for (const [groupName, budget] of Object.entries(delegateBudgets ?? {})) {
+    if (!merged[groupName]) {
+      merged[groupName] = budget;
+    }
+  }
+
+  return merged;
 }
 
 function createAbortTimeoutContext(timeoutMs: number): {

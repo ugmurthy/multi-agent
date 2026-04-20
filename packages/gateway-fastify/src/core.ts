@@ -3,6 +3,8 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue };
 export type JsonSchema = Record<string, unknown>;
 export type CaptureMode = 'full' | 'summary' | 'none';
+export type ToolBudgetExhaustedAction = 'fail' | 'continue_with_warning' | 'ask_model';
+export type ResearchPolicyName = 'none' | 'light' | 'standard' | 'deep';
 
 interface CoreRuntimeModule {
   createAdaptiveAgent(options: CreateAdaptiveAgentOptions): unknown;
@@ -33,6 +35,23 @@ export interface AgentDefaults {
   requireApprovalForWriteTools?: boolean;
   autoApproveAll?: boolean;
   capture?: CaptureMode;
+  toolBudgets?: Record<string, ToolBudget>;
+  researchPolicy?: ResearchPolicyName | ResearchPolicy;
+}
+
+export interface ToolBudget {
+  maxCalls?: number;
+  maxConsecutiveCalls?: number;
+  checkpointAfter?: number;
+  onExhausted?: ToolBudgetExhaustedAction;
+}
+
+export interface ResearchPolicy {
+  mode: ResearchPolicyName;
+  maxSearches?: number;
+  maxPagesRead?: number;
+  checkpointAfter?: number;
+  requirePurpose?: boolean;
 }
 
 export interface ModelAdapterConfig {
@@ -187,6 +206,7 @@ export interface ToolDefinition<I extends JsonValue = JsonValue, O extends JsonV
     retryOn?: FailureKind[];
   };
   redact?: ToolRedactionPolicy;
+  budgetGroup?: string;
   summarizeResult?: (output: O) => JsonValue;
   recoverError?: (error: unknown, input: I) => O | undefined;
   execute(input: I, context: ToolContext): Promise<O>;

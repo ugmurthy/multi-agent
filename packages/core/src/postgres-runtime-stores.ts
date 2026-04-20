@@ -53,6 +53,9 @@ interface AgentRunRow {
   goal: string;
   input: JsonValue | null;
   context: Record<string, JsonValue> | null;
+  model_provider: string | null;
+  model_name: string | null;
+  model_parameters: Record<string, JsonValue> | null;
   metadata: Record<string, JsonValue> | null;
   status: string;
   current_step_id: string | null;
@@ -195,16 +198,18 @@ export const POSTGRES_RUNTIME_RUN_QUERIES = {
   create: `
     INSERT INTO agent_runs (
       id, root_run_id, parent_run_id, parent_step_id, delegate_name,
-      delegation_depth, current_child_run_id, goal, input, context, metadata,
+      delegation_depth, current_child_run_id, goal, input, context,
+      model_provider, model_name, model_parameters, metadata,
       status, version, total_prompt_tokens, total_completion_tokens,
       total_reasoning_tokens, estimated_cost_usd, created_at, updated_at,
       completed_at
     ) VALUES (
       $1, $2, $3, $4, $5,
-      $6, $7, $8, $9, $10, $11,
-      $12, 0, 0, 0,
-      0, 0, $13, $14,
-      $15
+      $6, $7, $8, $9, $10,
+      $11, $12, $13, $14,
+      $15, 0, 0, 0,
+      0, 0, $16, $17,
+      $18
     )
     RETURNING *
   `,
@@ -514,6 +519,9 @@ export class PostgresRunStore implements RunStore {
       run.goal,
       jsonbParam(run.input),
       jsonbParam(run.context),
+      run.modelProvider ?? null,
+      run.modelName ?? null,
+      jsonbParam(run.modelParameters),
       jsonbParam(run.metadata),
       run.status,
       now,
@@ -1028,6 +1036,9 @@ function runRowToRecord(row: AgentRunRow): AgentRun {
     goal: row.goal,
     input: row.input ?? undefined,
     context: row.context ?? undefined,
+    modelProvider: row.model_provider ?? undefined,
+    modelName: row.model_name ?? undefined,
+    modelParameters: row.model_parameters ?? undefined,
     status: row.status as RunStatus,
     currentStepId: row.current_step_id ?? undefined,
     currentPlanId: row.current_plan_id ?? undefined,
@@ -1230,5 +1241,17 @@ function assertMutableRunPatch(runId: UUID, current: AgentRun, patch: Partial<Ag
 
   if (patch.delegationDepth !== undefined && patch.delegationDepth !== current.delegationDepth) {
     throw new Error('delegationDepth is immutable');
+  }
+
+  if (patch.modelProvider && patch.modelProvider !== current.modelProvider) {
+    throw new Error('modelProvider is immutable');
+  }
+
+  if (patch.modelName && patch.modelName !== current.modelName) {
+    throw new Error('modelName is immutable');
+  }
+
+  if (patch.modelParameters && JSON.stringify(patch.modelParameters) !== JSON.stringify(current.modelParameters)) {
+    throw new Error('modelParameters is immutable');
   }
 }

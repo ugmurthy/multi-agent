@@ -1,0 +1,206 @@
+import { defineConfig, type Plugin } from 'vite';
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { SignJWT } from 'jose';
+
+interface DevTokenRequest {
+  subject?: unknown;
+  tenantId?: unknown;
+  roles?: unknown;
+}
+
+const GATEWAY_CONFIG_PATH = join(homedir(), '.adaptiveAgent', 'config', 'gateway.json');
+const DEFAULT_GATEWAY_JWT_SECRET = 'adaptive-agent-local-dev-secret';
+
+function gatewayDevApi(): Plugin {
+  return {
+    name: 'gateway-dev-api',
+    configureServer(server) {
+      server.middlewares.use('/api/gateway-defaults', async (_request, response) => {
+        try {
+          const connection = await loadLocalGatewayConnectionConfig();
+          const host = normalizeHost(connection?.host);
+          const port = connection?.port ?? 8959;
+          const websocketPath = connection?.websocketPath ?? '/ws';
+
+          sendJson(response, 200, {
+            socketUrl: `ws://${host}:${port}${websocketPath}`,
+            channel: 'web',
+            subject: 'local-dev-user',
+            tenantId: 'free',
+            roles: ['member'],
+          });
+        } catch (error) {
+          sendJson(response, 500, { message: errorMessage(error) });
+        }
+      });
+
+      server.middlewares.use('/api/dev-token', (request, response) => {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { message: 'method not allowed' });
+          return;
+        }
+
+        let body = '';
+        request.on('data', (chunk) => {
+          body += String(chunk);
+        });
+        request.on('end', async () => {
+          try {
+            const payload = parseJsonBody(body);
+            const subject = readString(payload.subject) ?? 'local-dev-user';
+            const tenantId = readString(payload.tenantId) ?? 'free';
+            const roles = readStringArray(payload.roles);
+            const token = await mintLocalDevJwt({
+              subject,
+              tenantId,
+              roles: roles.length > 0 ? roles : ['member'],
+            });
+
+            sendJson(response, 200, { token });
+          } catch (error) {
+            sendJson(response, 400, { message: errorMessage(error) });
+          }
+        });
+      });
+    },
+  };
+}
+
+async function loadLocalGatewayConnectionConfig(): Promise<{ host?: string; port?: number; websocketPath?: string } | undefined> {
+  const rawConfig = await loadLocalGatewayConfig();
+  if (!isRecord(rawConfig) || !isRecord(rawConfig.server)) {
+    return undefined;
+  }
+
+  const server = rawConfig.server;
+  return {
+    host: readString(server.host),
+    port: typeof server.port === 'number' && Number.isInteger(server.port) && server.port > 0 ? server.port : undefined,
+    websocketPath: readString(server.websocketPath),
+  };
+}
+
+async function loadLocalGatewayJwtAuthConfig(): Promise<{
+  secret?: string;
+  issuer?: string;
+  audience?: string | string[];
+  tenantIdClaim?: string;
+  rolesClaim?: string;
+} | undefined> {
+  const rawConfig = await loadLocalGatewayConfig();
+  if (!isRecord(rawConfig) || !isRecord(rawConfig.auth)) {
+    return undefined;
+  }
+
+  const auth = rawConfig.auth;
+  return {
+    secret: readString(auth.secret),
+    issuer: readString(auth.issuer),
+    audience: readAudience(auth.audience),
+    tenantIdClaim: readString(auth.tenantIdClaim),
+    rolesClaim: readString(auth.rolesClaim),
+  };
+}
+
+async function loadLocalGatewayConfig(): Promise<unknown> {
+  if (!existsSync(GATEWAY_CONFIG_PATH)) {
+    return undefined;
+  }
+
+  return JSON.parse(await readFile(GATEWAY_CONFIG_PATH, 'utf-8')) as unknown;
+}
+
+async function mintLocalDevJwt(options: { subject: string; tenantId?: string; roles?: string[] }): Promise<string> {
+  const auth = await loadLocalGatewayJwtAuthConfig();
+  const secret = process.env.GATEWAY_JWT_SECRET ?? auth?.secret ?? DEFAULT_GATEWAY_JWT_SECRET;
+  const tenantIdClaim = auth?.tenantIdClaim ?? 'tenantId';
+  const rolesClaim = auth?.rolesClaim ?? 'roles';
+  const payload: Record<string, string | string[]> = {};
+
+  if (options.tenantId) {
+    payload[tenantIdClaim] = options.tenantId;
+  }
+  if (options.roles?.length) {
+    payload[rolesClaim] = [...new Set(options.roles)];
+  }
+
+  let jwt = new SignJWT(payload)
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setSubject(options.subject)
+    .setIssuedAt()
+    .setExpirationTime('7d');
+
+  if (auth?.issuer) {
+    jwt = jwt.setIssuer(auth.issuer);
+  }
+  if (auth?.audience) {
+    jwt = jwt.setAudience(auth.audience);
+  }
+
+  return jwt.sign(new TextEncoder().encode(secret));
+}
+
+function normalizeHost(host: string | undefined): string {
+  if (!host || host === '0.0.0.0' || host === '::') {
+    return '127.0.0.1';
+  }
+
+  return host;
+}
+
+function parseJsonBody(body: string): DevTokenRequest {
+  if (!body.trim()) {
+    return {};
+  }
+
+  const parsed = JSON.parse(body) as unknown;
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as DevTokenRequest) : {};
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((entry) => entry.length > 0);
+}
+
+function readAudience(value: unknown): string | string[] | undefined {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim();
+  }
+
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const audience = readStringArray(value);
+  return audience.length > 0 ? audience : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sendJson(response: { statusCode: number; setHeader: (key: string, value: string) => void; end: (body: string) => void }, status: number, payload: unknown): void {
+  response.statusCode = status;
+  response.setHeader('content-type', 'application/json');
+  response.end(JSON.stringify(payload));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export default defineConfig({
+  plugins: [gatewayDevApi()],
+});

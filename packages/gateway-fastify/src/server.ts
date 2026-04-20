@@ -17,7 +17,7 @@ import {
   type ChannelSubscriptionManager,
 } from './channels.js';
 import { executeGatewayChatTurn } from './chat.js';
-import type { GatewayConfig } from './config.js';
+import { resolveGatewayRequestLogLevel, type GatewayConfig } from './config.js';
 import type { JsonObject, JsonValue } from './core.js';
 import {
   ProtocolValidationError,
@@ -81,10 +81,12 @@ export async function createGatewayServer(
 ): Promise<FastifyInstance> {
   const app = Fastify(options.fastify);
   const stores = options.stores ?? createInMemoryGatewayStores();
+  const requestLogLevel = resolveGatewayRequestLogLevel(config.server.requestLogging);
   const requestLogger = options.requestLogger
-    ?? (config.server.requestLogging
+    ?? (requestLogLevel
       ? createGatewayLogger({
           destination: config.server.requestLoggingDestination,
+          level: requestLogLevel,
         })
       : undefined);
   const shouldCloseRequestLogger = options.requestLogger === undefined && requestLogger !== undefined;

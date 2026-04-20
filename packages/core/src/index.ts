@@ -11,5 +11,6 @@ export * from './postgres-runtime-migrations.js';
 export * from './delegation-executor.js';
 export * from './adapters/index.js';
 export * from './logger.js';
+export * from './tool-budget-policy.js';
 export * from './tools/index.js';
 export * from './skills/index.js';

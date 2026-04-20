@@ -36,7 +36,7 @@ describe('gateway config loading', () => {
             port: 3000,
             websocketPath: '/ws',
             healthPath: '/health',
-            requestLogging: true,
+            requestLogging: 'warn',
             requestLoggingDestination: 'file',
           },
           stores: {
@@ -114,6 +114,17 @@ describe('gateway config loading', () => {
           },
           tools: ['read_file'],
           delegates: ['researcher'],
+          defaults: {
+            researchPolicy: 'standard',
+            toolBudgets: {
+              'web_research.search': {
+                maxCalls: 3,
+                maxConsecutiveCalls: 2,
+                checkpointAfter: 2,
+                onExhausted: 'ask_model',
+              },
+            },
+          },
           routing: {
             allowedChannels: ['webchat'],
           },
@@ -149,7 +160,7 @@ describe('gateway config loading', () => {
         intervalMs: 30_000,
       },
     });
-    expect(loadedGatewayConfig.config.server.requestLogging).toBe(true);
+    expect(loadedGatewayConfig.config.server.requestLogging).toBe('warn');
     expect(loadedGatewayConfig.config.server.requestLoggingDestination).toBe('file');
     expect(loadedGatewayConfig.config.stores).toEqual({
       kind: 'postgres',
@@ -170,6 +181,17 @@ describe('gateway config loading', () => {
       id: 'support-agent',
       invocationModes: ['chat', 'run'],
       defaultInvocationMode: 'chat',
+      defaults: {
+        researchPolicy: 'standard',
+        toolBudgets: {
+          'web_research.search': {
+            maxCalls: 3,
+            maxConsecutiveCalls: 2,
+            checkpointAfter: 2,
+            onExhausted: 'ask_model',
+          },
+        },
+      },
     });
   });
 
@@ -196,6 +218,47 @@ describe('gateway config loading', () => {
     await expect(loadGatewayConfig({ configPath: gatewayConfigPath })).rejects.toThrowError(
       /server.host must be a non-empty string[\s\S]*server.port must be a positive integer[\s\S]*server.websocketPath must start with "\/"/,
     );
+  });
+
+  it('accepts boolean request logging values for backward compatibility', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+            requestLogging: true,
+          },
+          bindings: [],
+          hooks: {
+            failurePolicy: 'warn',
+            modules: [],
+            onAuthenticate: [],
+            onSessionResolve: [],
+            beforeRoute: [],
+            beforeInboundMessage: [],
+            beforeRunStart: [],
+            afterRunResult: [],
+            onAgentEvent: [],
+            beforeOutboundFrame: [],
+            onDisconnect: [],
+            onError: [],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const loadedGatewayConfig = await loadGatewayConfig({ configPath: gatewayConfigPath });
+
+    expect(loadedGatewayConfig.config.server.requestLogging).toBe(true);
   });
 
   it('defaults cron file sync to enabled when the object is present', async () => {
@@ -259,6 +322,45 @@ describe('gateway config loading', () => {
 
     await expect(loadAgentConfigFile({ configPath: agentConfigPath })).rejects.toThrowError(
       /defaultInvocationMode must be included in invocationModes[\s\S]*model.model must be a non-empty string/,
+    );
+  });
+
+  it('reports invalid research policy and budget config values', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const agentConfigPath = join(workspace, 'broken-agent.json');
+    await writeFile(
+      agentConfigPath,
+      JSON.stringify(
+        {
+          id: 'broken-agent',
+          name: 'Broken Agent',
+          invocationModes: ['chat'],
+          defaultInvocationMode: 'chat',
+          model: {
+            provider: 'ollama',
+            model: 'qwen3.5',
+          },
+          tools: [],
+          delegates: [],
+          defaults: {
+            researchPolicy: 'wild',
+            toolBudgets: {
+              'web_research.search': {
+                maxCalls: -1,
+                onExhausted: 'explode',
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await expect(loadAgentConfigFile({ configPath: agentConfigPath })).rejects.toThrowError(
+      /defaults.researchPolicy must be one of: none, light, standard, deep[\s\S]*defaults.toolBudgets.web_research.search.maxCalls must be a non-negative integer[\s\S]*defaults.toolBudgets.web_research.search.onExhausted must be one of: fail, continue_with_warning, ask_model/,
     );
   });
 });

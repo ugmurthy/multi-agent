@@ -157,7 +157,7 @@ File: `config/gateway.json`
     "port": 3000,
     "websocketPath": "/ws",
     "healthPath": "/health",
-    "requestLogging": true,
+    "requestLogging": "info",
     "requestLoggingDestination": "both"
   },
   "stores": {
@@ -228,7 +228,7 @@ File: `config/gateway.json`
 | `server.port` | Yes | Listen port |
 | `server.websocketPath` | Yes | WebSocket upgrade path (must start with `/`) |
 | `server.healthPath` | No | HTTP health endpoint path |
-| `server.requestLogging` | No | Enable structured HTTP request logs, summarized WebSocket frame logs, and scheduler cron lifecycle logs |
+| `server.requestLogging` | No | Request log level: `debug`, `info`, `warn`, or `silent`; `true` maps to `info` and `false` maps to `silent` for backward compatibility |
 | `server.requestLoggingDestination` | No | Request log sink: `console`, `file`, or `both`; defaults to `console` when request logging is enabled |
 | `stores.kind` | No | Storage backend: `memory`, `file`, or `postgres`; defaults to `memory` |
 | `stores.baseDir` | No | Required when `stores.kind` is `file` |
@@ -254,6 +254,8 @@ File: `config/gateway.json`
 | `bindings[]` | No | Routing bindings (channel, tenant, roles → agentId) |
 | `defaultAgentId` | No | Fallback agent when no binding matches |
 | `hooks` | Yes | Hook slot configuration |
+
+When `server.requestLogging` is `debug`, the gateway emits debug, info, warn, and error request logs. `info` emits info, warn, and error logs. `warn` emits warn and error logs. `silent` disables gateway request logging entirely.
 
 When `server.requestLoggingDestination` is `file` or `both`, the gateway writes newline-delimited JSON logs to `data/gateway/logs/gateway-YYYY-MM-DD.log` relative to the current working directory by default. The local `gateway:start` launcher writes these logs under `~/.adaptiveAgent/data/gateway/logs`.
 

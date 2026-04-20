@@ -16,6 +16,9 @@ export interface WebSearchToolConfig {
 type WebSearchInput = {
   query: string;
   maxResults?: number;
+  purpose?: string;
+  expectedUse?: 'verify' | 'discover' | 'compare' | 'current_status';
+  freshnessRequired?: boolean;
 };
 
 type WebSearchResult = {
@@ -27,6 +30,14 @@ type WebSearchResult = {
 type WebSearchOutput = {
   query: string;
   results: WebSearchResult[];
+  purpose?: string;
+  expectedUse?: 'verify' | 'discover' | 'compare' | 'current_status';
+  freshnessRequired?: boolean;
+  researchStatus?: {
+    status: 'complete' | 'partial';
+    reason?: 'budget_exhausted' | 'timeout' | 'provider_error';
+    unresolvedQuestions?: string[];
+  };
   error?: {
     kind: 'http_error' | 'network_error' | 'challenge' | 'timeout';
     message: string;
@@ -101,9 +112,10 @@ export function createWebSearchTool(config: WebSearchToolConfig): ToolDefinition
 
   return {
     name: 'web_search',
+    budgetGroup: 'web_research.search',
     timeoutMs,
     description:
-      'Search the web for information. Returns a list of results with title, URL, and snippet.',
+      'Search the web for current or unknown information. Include a short purpose when possible so the search stays goal-directed. Returns results with title, URL, and snippet.',
     retryPolicy: {
       retryable: true,
       retryOn: ['timeout', 'network', 'rate_limit', 'provider_error'],
@@ -118,12 +130,25 @@ export function createWebSearchTool(config: WebSearchToolConfig): ToolDefinition
           type: 'number',
           description: 'Maximum number of results to return.',
         },
+        purpose: {
+          type: 'string',
+          description: 'Why this search is needed for the current goal.',
+        },
+        expectedUse: {
+          type: 'string',
+          enum: ['verify', 'discover', 'compare', 'current_status'],
+          description: 'How the result will be used.',
+        },
+        freshnessRequired: {
+          type: 'boolean',
+          description: 'Whether the answer depends on current information.',
+        },
       },
     },
     async execute(rawInput, context) {
       // Some models send tool input as a JSON string instead of an object — normalise.
       const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
-      const { query, maxResults: perCallMax } = input as unknown as WebSearchInput;
+      const { query, maxResults: perCallMax, purpose, expectedUse, freshnessRequired } = input as unknown as WebSearchInput;
       const count = perCallMax ?? maxResults;
       try {
         const execution =
@@ -146,6 +171,12 @@ export function createWebSearchTool(config: WebSearchToolConfig): ToolDefinition
           {
             query,
             results: execution.results,
+            ...(purpose === undefined ? {} : { purpose }),
+            ...(expectedUse === undefined ? {} : { expectedUse }),
+            ...(freshnessRequired === undefined ? {} : { freshnessRequired }),
+            researchStatus: {
+              status: 'complete',
+            },
           },
           execution.diagnostics,
         );
@@ -157,7 +188,16 @@ export function createWebSearchTool(config: WebSearchToolConfig): ToolDefinition
     },
     recoverError(error, input) {
       const { query } = input;
-      return normalizeWebSearchError(error, query, provider).output;
+      const recovered = normalizeWebSearchError(error, query, provider).output;
+      recovered.purpose = input.purpose;
+      recovered.expectedUse = input.expectedUse;
+      recovered.freshnessRequired = input.freshnessRequired;
+      recovered.researchStatus = {
+        status: 'partial',
+        reason: recovered.error?.kind === 'timeout' ? 'timeout' : 'provider_error',
+        unresolvedQuestions: [],
+      };
+      return recovered;
     },
     summarizeResult(output) {
       return summarizeWebSearchOutput(output);
@@ -380,8 +420,8 @@ function summarizeWebSearchOutput(output: WebSearchOutput): JsonValue {
       provider: output.error.provider,
       error: {
         kind: output.error.kind,
-        status: output.error.status,
         message: output.error.message,
+        ...(output.error.status === undefined ? {} : { status: output.error.status }),
       },
     };
   }

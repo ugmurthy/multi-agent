@@ -93,6 +93,27 @@ export interface AgentDefaults {
   maxRetriesPerStep?: number;
   requireApprovalForWriteTools?: boolean;
   capture?: CaptureMode;
+  toolBudgets?: Record<string, ToolBudget>;
+  researchPolicy?: ResearchPolicyName | ResearchPolicy;
+}
+
+export type ToolBudgetExhaustedAction = 'fail' | 'continue_with_warning' | 'ask_model';
+
+export interface ToolBudget {
+  maxCalls?: number;
+  maxConsecutiveCalls?: number;
+  checkpointAfter?: number;
+  onExhausted?: ToolBudgetExhaustedAction;
+}
+
+export type ResearchPolicyName = 'none' | 'light' | 'standard' | 'deep';
+
+export interface ResearchPolicy {
+  mode: ResearchPolicyName;
+  maxSearches?: number;
+  maxPagesRead?: number;
+  checkpointAfter?: number;
+  requirePurpose?: boolean;
 }
 
 export interface DelegationPolicy {
@@ -214,9 +235,12 @@ export interface ToolDefinition<I extends JsonValue = JsonValue, O extends JsonV
   requiresApproval?: boolean;
   capture?: CaptureMode;
   redact?: ToolRedactionPolicy;
+  budgetGroup?: string;
   summarizeResult?: (output: O) => JsonValue;
   execute(input: I, context: ToolContext): Promise<O>;
 }
+
+These defaults are additive and disabled unless configured. In the first v1.4 pass, research budgets steer tool admission and model prompting only; first-class top-level `partial` run results remain deferred.
 
 export interface ModelMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';

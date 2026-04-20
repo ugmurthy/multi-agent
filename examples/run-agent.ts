@@ -236,6 +236,7 @@ const {
     ...(modelTimeoutMs === undefined ? {} : { modelTimeoutMs }),
     autoApproveAll: autoApprove,
     capture: verbose ? 'full' : 'summary',
+    researchPolicy: 'standard',
   },
 });
 

@@ -4,7 +4,7 @@
     "port": 3000,
     "websocketPath": "/ws",
     "healthPath": "/health",
-    "requestLogging": true,
+    "requestLogging": "info",
     "requestLoggingDestination": "both"
   },
   "agentRuntimeLogging": {

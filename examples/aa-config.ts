@@ -9,7 +9,7 @@ import {
   type AdaptiveAgentLogDestination,
   type AdaptiveAgentLogLevel,
 } from '../packages/core/src/logger.js';
-import type { CaptureMode } from '../packages/core/src/types.js';
+import type { CaptureMode, ResearchPolicyName, ToolBudget } from '../packages/core/src/types.js';
 
 type ModelProvider = ModelAdapterConfig['provider'];
 type WebSearchProvider = 'brave' | 'duckduckgo';
@@ -53,6 +53,8 @@ export interface AaConfigFile {
     toolTimeoutMs?: number;
     modelTimeoutMs?: number;
     capture?: CaptureMode;
+    researchPolicy?: ResearchPolicyName;
+    toolBudgets?: Record<string, ToolBudget>;
     delegation?: {
       maxDepth?: number;
       maxChildrenPerRun?: number;
@@ -91,6 +93,8 @@ export interface ResolvedAaConfig {
     toolTimeoutMs: number;
     modelTimeoutMs?: number;
     capture: CaptureMode;
+    researchPolicy?: ResearchPolicyName;
+    toolBudgets?: Record<string, ToolBudget>;
     delegation: {
       maxDepth: number;
       maxChildrenPerRun: number;
@@ -237,6 +241,13 @@ export async function resolveAaConfig(options: { configPath?: string } = {}): Pr
   const modelTimeoutMs = readInteger(agent?.modelTimeoutMs, 'agent.modelTimeoutMs', loadedConfig.path, { minimum: 0 });
   const capture =
     readEnum(agent?.capture, CAPTURE_MODES, 'agent.capture', loadedConfig.path) ?? (verbose ? 'full' : 'summary');
+  const researchPolicy = readEnum(
+    agent?.researchPolicy,
+    ['none', 'light', 'standard', 'deep'] as const,
+    'agent.researchPolicy',
+    loadedConfig.path,
+  );
+  const toolBudgets = readToolBudgets(agent?.toolBudgets, 'agent.toolBudgets', loadedConfig.path);
 
   const delegation = readRecord(agent?.delegation, 'agent.delegation', loadedConfig.path);
   const maxDepth = readInteger(
@@ -291,6 +302,8 @@ export async function resolveAaConfig(options: { configPath?: string } = {}): Pr
       toolTimeoutMs,
       modelTimeoutMs,
       capture,
+      researchPolicy,
+      toolBudgets,
       delegation: {
         maxDepth,
         maxChildrenPerRun,
@@ -382,6 +395,40 @@ function readInteger(
   }
 
   return value as number;
+}
+
+function readToolBudgets(value: unknown, field: string, configPath: string): Record<string, ToolBudget> | undefined {
+  const record = readRecord(value, field, configPath);
+  if (!record) {
+    return undefined;
+  }
+
+  const budgets: Record<string, ToolBudget> = {};
+  for (const [groupName, rawBudget] of Object.entries(record)) {
+    const budget = readRecord(rawBudget, `${field}.${groupName}`, configPath);
+    if (!budget) {
+      continue;
+    }
+
+    budgets[groupName] = {
+      maxCalls: readInteger(budget.maxCalls, `${field}.${groupName}.maxCalls`, configPath, { minimum: 0 }),
+      maxConsecutiveCalls: readInteger(
+        budget.maxConsecutiveCalls,
+        `${field}.${groupName}.maxConsecutiveCalls`,
+        configPath,
+        { minimum: 0 },
+      ),
+      checkpointAfter: readInteger(budget.checkpointAfter, `${field}.${groupName}.checkpointAfter`, configPath, { minimum: 0 }),
+      onExhausted: readEnum(
+        budget.onExhausted,
+        ['fail', 'continue_with_warning', 'ask_model'] as const,
+        `${field}.${groupName}.onExhausted`,
+        configPath,
+      ),
+    };
+  }
+
+  return budgets;
 }
 
 function readEnum<T extends string>(

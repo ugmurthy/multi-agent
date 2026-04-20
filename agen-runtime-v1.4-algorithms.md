@@ -340,6 +340,23 @@ A typical delegated sequence should look like this:
 
 Every run keeps its own sequence numbers. Tree reconstruction happens from run linkage rather than a global event order.
 
+## 11A. Goal-Directed Research Budget Admission
+
+When a pending tool call targets a configured read-only research budget group such as `web_research.search` or `web_research.read`, the runtime should:
+
+1. admit the call only if `maxCalls` and `maxConsecutiveCalls` still allow it
+2. increment budget counters only after admission
+3. inject a runtime-authored checkpoint message before the next model call when `checkpointAfter` is reached
+4. when exhausted, return a normal tool result telling the model to answer from current evidence or state uncertainty instead of continuing broad search
+
+Checkpoint text:
+
+```text
+You are near the web research budget. Use current evidence if it is sufficient. Only call another web research tool if you can name the specific missing fact needed for the user's goal. If evidence is incomplete, say what is uncertain instead of continuing to search broadly.
+```
+
+Budget exhaustion for read-only research is not automatically equivalent to semantic task failure in this pass. Terminal run states remain the existing `success` and `failure` variants.
+
 ## 12. Failure Modes To Handle Explicitly
 
 The runtime should make deliberate decisions for these cases:

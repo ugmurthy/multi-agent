@@ -251,7 +251,11 @@ type AgentDefaults = {
   maxRetriesPerStep?: number;
   requireApprovalForWriteTools?: boolean;
   capture?: 'full' | 'summary' | 'none';
+  toolBudgets?: Record<string, ToolBudget>;
+  researchPolicy?: ResearchPolicyName | ResearchPolicy;
 };
+
+Goal-directed external research may be bounded through optional tool budgets. This keeps search-like tools available, but pushes the model to search only when current or unknown facts are actually needed, to checkpoint when the evidence is probably sufficient, and to answer with explicit uncertainty instead of searching broadly after the configured budget is exhausted.
 
 type DelegationPolicy = {
   maxDepth?: number;

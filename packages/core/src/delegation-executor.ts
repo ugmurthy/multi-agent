@@ -22,6 +22,7 @@ import type {
   RuntimeStores,
   RuntimeTransactionStore,
   SnapshotStore,
+  ToolBudget,
   ToolContext,
   ToolDefinition,
   ToolExecutionStore,
@@ -247,7 +248,7 @@ export class DelegationExecutor {
       model: delegate.model ?? this.options.model,
       tools: this.pickTools(delegate.allowedTools),
       delegates: this.policy.allowRecursiveDelegation ? [...this.delegatesByName.values()] : [],
-      defaults: { ...this.options.defaults, ...delegate.defaults },
+      defaults: mergeDelegateAgentDefaults(this.options.defaults, delegate.defaults),
     });
 
     this.logLifecycle('info', 'delegate.child_result', {
@@ -1144,6 +1145,49 @@ export class DelegationExecutor {
         return;
     }
   }
+}
+
+function mergeDelegateAgentDefaults(
+  parentDefaults: AgentDefaults | undefined,
+  delegateDefaults: Partial<AgentDefaults> | undefined,
+): AgentDefaults | undefined {
+  if (!parentDefaults && !delegateDefaults) {
+    return undefined;
+  }
+
+  const defaults: AgentDefaults = {
+    ...(parentDefaults ?? {}),
+    ...(delegateDefaults ?? {}),
+  };
+
+  if (parentDefaults?.maxSteps !== undefined) {
+    defaults.maxSteps = Math.max(parentDefaults.maxSteps, delegateDefaults?.maxSteps ?? parentDefaults.maxSteps);
+  }
+
+  defaults.researchPolicy = parentDefaults?.researchPolicy ?? delegateDefaults?.researchPolicy;
+  defaults.toolBudgets = mergeDelegateToolBudgets(parentDefaults?.toolBudgets, delegateDefaults?.toolBudgets);
+  return defaults;
+}
+
+function mergeDelegateToolBudgets(
+  parentBudgets: Record<string, ToolBudget> | undefined,
+  delegateBudgets: Record<string, ToolBudget> | undefined,
+): Record<string, ToolBudget> | undefined {
+  if (!parentBudgets && !delegateBudgets) {
+    return undefined;
+  }
+
+  const merged = {
+    ...(parentBudgets ?? {}),
+  };
+
+  for (const [groupName, budget] of Object.entries(delegateBudgets ?? {})) {
+    if (!merged[groupName]) {
+      merged[groupName] = budget;
+    }
+  }
+
+  return merged;
 }
 
 function isJsonObject(value: JsonValue): value is JsonObject {

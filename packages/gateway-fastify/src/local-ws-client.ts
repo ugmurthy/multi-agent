@@ -115,18 +115,14 @@ async function main(): Promise<void> {
     },
   });
 
-  const sessionOpened = createDeferred<SessionOpenedFrame>();
+  const socketReady = createDeferred<void>();
   let pendingSessionOpen: ReturnType<typeof createDeferred<SessionOpenedFrame>> | undefined;
   const terminalFrame = createDeferred<OutboundFrame>();
   let terminalFrameRequired = false;
   const closed = createDeferred<{ code: number; reason: string }>();
 
   socket.addEventListener('open', () => {
-    sendFrame(socket, {
-      type: 'session.open',
-      channelId: options.channel,
-      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-    });
+    socketReady.resolve();
   });
 
   socket.addEventListener('message', (event) => {
@@ -139,14 +135,10 @@ async function main(): Promise<void> {
     switch (frame.type) {
       case 'session.opened':
         console.log(`Session opened: ${frame.sessionId} (${frame.status})`);
-        if (!sessionOpened.isSettled()) {
-          sessionOpened.resolve(frame);
-          break;
-        }
-
         if (pendingSessionOpen) {
           pendingSessionOpen.resolve(frame);
           pendingSessionOpen = undefined;
+          break;
         }
         break;
       case 'session.updated':
@@ -226,7 +218,7 @@ async function main(): Promise<void> {
 
   socket.addEventListener('close', (event) => {
     console.log(`Socket closed (${event.code}${event.reason ? `: ${event.reason}` : ''})`);
-    rejectIfPending(sessionOpened, new Error('Socket closed before session.opened was received.'));
+    rejectIfPending(socketReady, new Error('Socket closed before the socket finished opening.'));
     if (pendingSessionOpen) {
       rejectIfPending(pendingSessionOpen, new Error('Socket closed before an additional session.opened was received.'));
       pendingSessionOpen = undefined;
@@ -241,10 +233,8 @@ async function main(): Promise<void> {
     console.log('WebSocket error encountered.');
   });
 
-  const openedSession = await sessionOpened.promise;
-  recordInteractiveSession(state, getInteractiveSessionMode(openedSession), openedSession.sessionId);
-
-  async function openAdditionalSession(): Promise<SessionOpenedFrame> {
+  async function openAdditionalSession(sessionId?: string): Promise<SessionOpenedFrame> {
+    await socketReady.promise;
     if (pendingSessionOpen) {
       throw new Error('A session.open request is already in flight. Wait for it to finish before opening another session.');
     }
@@ -253,6 +243,7 @@ async function main(): Promise<void> {
     sendFrame(socket, {
       type: 'session.open',
       channelId: options.channel,
+      ...(sessionId ? { sessionId } : {}),
     });
 
     try {
@@ -260,6 +251,18 @@ async function main(): Promise<void> {
     } finally {
       pendingSessionOpen = undefined;
     }
+  }
+
+  async function ensureChatSessionId(): Promise<string> {
+    const chatTarget = selectInteractiveSession('chat', state);
+    if (chatTarget.sessionId) {
+      return chatTarget.sessionId;
+    }
+
+    const chatSession = await openAdditionalSession();
+    recordInteractiveSession(state, 'chat', chatSession.sessionId);
+    console.log(`Chat session ready: ${chatSession.sessionId}`);
+    return chatSession.sessionId;
   }
 
   async function ensureRunSessionId(): Promise<string> {
@@ -274,12 +277,19 @@ async function main(): Promise<void> {
     return runSession.sessionId;
   }
 
+  await socketReady.promise;
+
+  if (options.sessionId) {
+    const attachedSession = await openAdditionalSession(options.sessionId);
+    recordInteractiveSession(state, getInteractiveSessionMode(attachedSession), attachedSession.sessionId);
+  }
+
   if (options.message) {
-    ensureSessionId(state);
+    const sessionId = await ensureChatSessionId();
     terminalFrameRequired = true;
     sendFrame(socket, {
       type: 'message.send',
-      sessionId: state.sessionId,
+      sessionId,
       content: options.message,
     });
     await terminalFrame.promise;
@@ -289,10 +299,7 @@ async function main(): Promise<void> {
   }
 
   if (options.runGoal) {
-    const runSessionId = state.runSessionId ?? state.sessionId;
-    if (!runSessionId) {
-      throw new Error('No run-capable sessionId is available yet.');
-    }
+    const runSessionId = await ensureRunSessionId();
     terminalFrameRequired = true;
     sendFrame(socket, {
       type: 'run.start',
@@ -410,10 +417,10 @@ async function main(): Promise<void> {
         continue;
       }
 
-      ensureSessionId(state);
+      const sessionId = await ensureChatSessionId();
       sendFrame(socket, {
         type: 'message.send',
-        sessionId: state.sessionId,
+        sessionId,
         content: line,
       });
     }
@@ -549,12 +556,6 @@ function parseFrame(raw: string | ArrayBuffer | Blob | Uint8Array): OutboundFram
           : String(raw);
 
   return JSON.parse(text) as OutboundFrame;
-}
-
-function ensureSessionId(state: ClientState): asserts state is ClientState & { sessionId: string } {
-  if (!state.sessionId) {
-    throw new Error('No sessionId is available yet.');
-  }
 }
 
 export interface InteractiveSessionSelection {

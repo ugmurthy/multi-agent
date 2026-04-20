@@ -9,9 +9,9 @@
   "scripts": {
     "gateway:ws-client": "bun run ./packages/gateway-fastify/src/local-ws-client.ts",
     "gateway:client:tui": "bun run ./packages/gateway-fastify/src/local-ws-client-tui.ts",
-    "gateway:client:web": "bun --cwd ./packages/gateway-client-web run dev",
-    "gateway:client:web:build": "bun --cwd ./packages/gateway-client-web run build",
-    "gateway:client:web:check": "bun --cwd ./packages/gateway-client-web run check",
+    "gateway:client:web": "bun run --cwd ./packages/gateway-web dev",
+    "gateway:client:web:build": "bun run --cwd ./packages/gateway-web build",
+    "gateway:client:web:check": "bun run --cwd ./packages/gateway-web typecheck",
     "gateway:logs:analyze": "bun run ./packages/gateway-fastify/src/analyze-logs.ts",
     "gateway:mint-jwt": "bun run ./packages/gateway-fastify/src/mint-local-jwt.ts",
     "gateway:start": "bun run ./packages/gateway-fastify/src/start-local.ts"

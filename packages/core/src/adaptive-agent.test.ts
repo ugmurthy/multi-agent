@@ -64,6 +64,19 @@ function createLookupTool(): ToolDefinition {
   };
 }
 
+function createBudgetedSearchTool(): ToolDefinition {
+  return {
+    name: 'web_search',
+    description: 'Search the web.',
+    inputSchema: { type: 'object', additionalProperties: true },
+    budgetGroup: 'web_research.search',
+    execute: async (input) => ({
+      query: typeof input === 'object' && input && 'query' in input ? input.query : 'unknown',
+      results: [{ title: 'stub', url: 'https://example.com', snippet: 'stub' }],
+    }),
+  };
+}
+
 describe('AdaptiveAgent', () => {
   it('uses transcript messages for chat-style runs', async () => {
     const runStore = new InMemoryRunStore();
@@ -130,6 +143,40 @@ describe('AdaptiveAgent', () => {
 
     const storedRun = await runStore.getRun(result.runId);
     expect(storedRun?.goal).toBe('What is the capital of France?');
+  });
+
+  it('persists provider and model on newly created runs', async () => {
+    const runStore = new InMemoryRunStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'stop',
+        text: 'Done.',
+      },
+    ], 'mesh');
+
+    const createRunSpy = vi.spyOn(runStore, 'createRun');
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [],
+      runStore,
+    });
+
+    const result = await agent.run({
+      goal: 'Persist model config',
+    });
+
+    expect(result.status).toBe('success');
+    expect(createRunSpy).toHaveBeenCalledWith(expect.objectContaining({
+      modelProvider: 'mesh',
+      modelName: 'sequence',
+    }));
+
+    const storedRun = await runStore.getRun(result.runId);
+    expect(storedRun).toMatchObject({
+      modelProvider: 'mesh',
+      modelName: 'sequence',
+    });
+    expect(storedRun?.modelParameters).toBeUndefined();
   });
 
   it('retries a failed model timeout from the same run and step', async () => {
@@ -876,6 +923,18 @@ describe('AdaptiveAgent', () => {
     expect(modelRequestLog).toBeDefined();
     expect(modelRequestLog?.messageCount).toBeGreaterThan(0);
 
+    const systemInjectionLog = entries.find(
+      (entry) => entry.event === 'system_message.injected' && entry.source === 'initial_prompt',
+    );
+    expect(systemInjectionLog).toMatchObject({
+      snapshotField: 'messages',
+      snapshotStoreConfigured: true,
+    });
+    expect(systemInjectionLog?.content).toMatchObject({
+      type: 'string',
+      preview: expect.stringContaining('You are AdaptiveAgent.'),
+    });
+
     const delegateSpawnedLog = entries.find(
       (entry) => entry.event === 'delegate.spawned' && entry.toolName === 'delegate.researcher',
     );
@@ -894,6 +953,16 @@ describe('AdaptiveAgent', () => {
     );
     expect(lookupCompletedLog?.output).toMatchObject({
       finding: 'researched:delegation',
+    });
+
+    const latestSnapshot = await snapshotStore.getLatest(result.runId);
+    expect(latestSnapshot?.state).toMatchObject({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('You are AdaptiveAgent.'),
+        }),
+      ]),
     });
 
     const completedRunLog = entries.find((entry) => entry.event === 'run.completed' && entry.output);
@@ -2481,5 +2550,114 @@ describe('AdaptiveAgent', () => {
     expect(systemMessage!.content).toContain('## Skill Instructions');
     expect(systemMessage!.content).toContain('# Custom Researcher');
     expect(systemMessage!.content).toContain('Always cite your sources');
+  });
+
+  it('injects the budget checkpoint message before the next model call', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const toolExecutionStore = new InMemoryToolExecutionStore();
+    const chunks: string[] = [];
+    const stream = new PassThrough();
+    stream.on('data', (chunk) => chunks.push(chunk.toString()));
+    const model = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'search-1', name: 'web_search', input: { query: 'first', purpose: 'find starting evidence' } }],
+      },
+      {
+        finishReason: 'stop',
+        structuredOutput: { done: true },
+      },
+    ]);
+
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createBudgetedSearchTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+      toolExecutionStore,
+      logger: pino({ level: 'info', base: undefined }, stream),
+      defaults: {
+        researchPolicy: 'light',
+      },
+    });
+
+    const result = await agent.run({ goal: 'Research something current' });
+    expect(result).toMatchObject({ status: 'success' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const entries = chunks
+      .join('')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const checkpointLog = entries.find(
+      (entry) => entry.event === 'system_message.injected' && entry.source === 'tool_budget.checkpoint',
+    );
+    expect(checkpointLog).toMatchObject({
+      snapshotField: 'pendingRuntimeMessages',
+      snapshotStoreConfigured: true,
+    });
+    expect(checkpointLog?.content).toMatchObject({
+      type: 'string',
+      preview: expect.stringContaining('near the web research budget'),
+    });
+
+    expect(model.receivedRequests[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('near the web research budget'),
+        }),
+      ]),
+    );
+  });
+
+  it('steers the model to answer from current evidence when the search budget is exhausted', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const toolExecutionStore = new InMemoryToolExecutionStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'search-1', name: 'web_search', input: { query: 'first', purpose: 'find starting evidence' } }],
+      },
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'search-2', name: 'web_search', input: { query: 'second', purpose: 'double check' } }],
+      },
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'search-3', name: 'web_search', input: { query: 'third', purpose: 'keep searching' } }],
+      },
+      {
+        finishReason: 'stop',
+        structuredOutput: { done: true },
+      },
+    ]);
+
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createBudgetedSearchTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+      toolExecutionStore,
+      defaults: {
+        researchPolicy: 'light',
+      },
+    });
+
+    const result = await agent.run({ goal: 'Research something current' });
+    expect(result).toMatchObject({ status: 'success' });
+    expect(model.receivedRequests[3]?.messages.at(-1)).toMatchObject({
+      role: 'tool',
+      name: 'web_search',
+      content: expect.stringContaining('budget_exhausted'),
+    });
   });
 });

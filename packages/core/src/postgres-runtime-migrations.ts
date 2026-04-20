@@ -195,4 +195,17 @@ create index if not exists tool_executions_child_run_idx
   where child_run_id is not null;
 `,
   },
+  {
+    name: 'core:003_run_model_persistence',
+    sql: `
+alter table agent_runs
+  add column if not exists model_provider text;
+
+alter table agent_runs
+  add column if not exists model_name text;
+
+alter table agent_runs
+  add column if not exists model_parameters jsonb;
+`,
+  },
 ];

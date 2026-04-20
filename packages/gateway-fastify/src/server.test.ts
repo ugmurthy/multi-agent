@@ -123,6 +123,31 @@ describe('createGatewayServer', () => {
     }
   });
 
+  it('suppresses HTTP request lifecycle logs when request logging is silent', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const app = await createGatewayServer({
+        ...baseConfig,
+        server: {
+          ...baseConfig.server,
+          requestLogging: 'silent',
+        },
+      });
+      apps.push(app);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/health',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(consoleSpy).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
   it('redacts websocket query tokens from request logs', async () => {
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 

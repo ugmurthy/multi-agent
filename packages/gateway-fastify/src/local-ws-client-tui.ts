@@ -371,7 +371,7 @@ async function runTuiMode(
   tui.addChild(shell);
   tui.setFocus(editor);
 
-  const sessionOpened = createDeferred<SessionOpenedFrame>();
+  const socketReady = createDeferred<void>();
   const closed = createDeferred<{ code: number; reason: string }>();
   let pendingSessionOpen: ReturnType<typeof createDeferred<SessionOpenedFrame>> | undefined;
 
@@ -517,11 +517,7 @@ async function runTuiMode(
     state.connected = true;
     statusBar.invalidate();
     tui.requestRender();
-    sendFrame({
-      type: 'session.open',
-      channelId: options.channel,
-      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-    });
+    socketReady.resolve();
   });
 
   socket.addEventListener('message', async (event) => {
@@ -542,18 +538,12 @@ async function runTuiMode(
           content: `Session opened: ${frame.sessionId} (${frame.status})`,
           timestamp: new Date(),
         });
-        if (!sessionOpened.isSettled()) {
-          recordInteractiveSession(state, getInteractiveSessionMode(frame), frame.sessionId);
-        }
         statusBar.invalidate();
         tui.requestRender();
-        if (!sessionOpened.isSettled()) {
-          sessionOpened.resolve(frame);
-          break;
-        }
         if (pendingSessionOpen) {
           pendingSessionOpen.resolve(frame);
           pendingSessionOpen = undefined;
+          break;
         }
         break;
 
@@ -697,7 +687,7 @@ async function runTuiMode(
       content: `Socket closed (${event.code}${event.reason ? `: ${event.reason}` : ''})`,
       timestamp: new Date(),
     });
-    rejectIfPending(sessionOpened, new Error('Socket closed before session.opened was received.'));
+    rejectIfPending(socketReady, new Error('Socket closed before the socket finished opening.'));
     if (pendingSessionOpen) {
       rejectIfPending(pendingSessionOpen, new Error('Socket closed before an additional session.opened was received.'));
       pendingSessionOpen = undefined;
@@ -722,10 +712,8 @@ async function runTuiMode(
     tui.requestRender();
   };
 
-  const opened = await sessionOpened.promise;
-  recordInteractiveSession(state, getInteractiveSessionMode(opened), opened.sessionId);
-
-  async function openAdditionalSession(): Promise<SessionOpenedFrame> {
+  async function openAdditionalSession(sessionId?: string): Promise<SessionOpenedFrame> {
+    await socketReady.promise;
     if (pendingSessionOpen) {
       throw new Error('A session.open request is already in flight.');
     }
@@ -733,12 +721,31 @@ async function runTuiMode(
     sendFrame({
       type: 'session.open',
       channelId: options.channel,
+      ...(sessionId ? { sessionId } : {}),
     });
     try {
       return await pendingSessionOpen.promise;
     } finally {
       pendingSessionOpen = undefined;
     }
+  }
+
+  async function ensureChatSessionId(): Promise<string> {
+    const chatTarget = selectInteractiveSession('chat', state);
+    if (chatTarget.sessionId) {
+      return chatTarget.sessionId;
+    }
+
+    const chatSession = await openAdditionalSession();
+    recordInteractiveSession(state, 'chat', chatSession.sessionId);
+    messageLog.addMessage({
+      type: 'system',
+      content: `Chat session ready: ${chatSession.sessionId}`,
+      timestamp: new Date(),
+    });
+    statusBar.invalidate();
+    tui.requestRender();
+    return chatSession.sessionId;
   }
 
   async function ensureRunSessionId(): Promise<string> {
@@ -759,11 +766,11 @@ async function runTuiMode(
     return runSession.sessionId;
   }
 
-  function getSessionId(): string {
-    if (!state.sessionId) {
-      throw new Error('No sessionId is available yet.');
-    }
-    return state.sessionId;
+  await socketReady.promise;
+
+  if (options.sessionId) {
+    const attachedSession = await openAdditionalSession(options.sessionId);
+    recordInteractiveSession(state, getInteractiveSessionMode(attachedSession), attachedSession.sessionId);
   }
 
   editor.onSubmit = async (value: string) => {
@@ -932,7 +939,7 @@ async function runTuiMode(
     }
 
     try {
-      const sessionId = getSessionId();
+      const sessionId = await ensureChatSessionId();
       messageLog.addMessage({
         type: 'user',
         content: trimmed,

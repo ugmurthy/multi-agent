@@ -152,6 +152,8 @@ const {
     ...(config.agent.modelTimeoutMs === undefined ? {} : { modelTimeoutMs: config.agent.modelTimeoutMs }),
     autoApproveAll: config.agent.autoApprove,
     capture: config.agent.capture,
+    ...(config.agent.researchPolicy === undefined ? {} : { researchPolicy: config.agent.researchPolicy }),
+    ...(config.agent.toolBudgets === undefined ? {} : { toolBudgets: config.agent.toolBudgets }),
   },
 });
 

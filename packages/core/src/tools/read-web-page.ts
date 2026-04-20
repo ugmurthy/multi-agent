@@ -43,6 +43,7 @@ export function createReadWebPageTool(config?: ReadWebPageToolConfig): ToolDefin
 
   return {
     name: 'read_web_page',
+    budgetGroup: 'web_research.read',
     timeoutMs,
     description:
       'Fetch a web page and extract its text content. Returns the URL, page title, and extracted text.',

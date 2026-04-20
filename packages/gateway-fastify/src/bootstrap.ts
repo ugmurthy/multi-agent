@@ -11,6 +11,7 @@ import {
   loadAgentConfigs,
   loadGatewayConfig,
   type LoadedConfig,
+  resolveGatewayRequestLogLevel,
 } from './config.js';
 import { AgentRegistry, createAgentRegistry, type AgentFactory } from './agent-registry.js';
 import { createJwtAuthProvider } from './auth.js';
@@ -88,9 +89,11 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
       runtime: storeBundle.runtimeStores,
     });
     const stores = storeBundle.gatewayStores;
-    requestLogger = loadedGatewayConfig.config.server.requestLogging
+    const requestLogLevel = resolveGatewayRequestLogLevel(loadedGatewayConfig.config.server.requestLogging);
+    requestLogger = requestLogLevel
       ? createGatewayLogger({
           destination: loadedGatewayConfig.config.server.requestLoggingDestination,
+          level: requestLogLevel,
           logDir: options.logDir,
         })
       : undefined;
