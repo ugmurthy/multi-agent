@@ -25,14 +25,20 @@ import type {
   CronRunStore,
   GatewayCronJobRecord,
   GatewayCronRunRecord,
+  GatewayRunAdmissionRecord,
   GatewaySessionRecord,
   GatewayStores,
+  RunAdmissionLimits,
+  RunAdmissionStore,
   SessionRunLinkRecord,
   SessionRunLinkStore,
   SessionStore,
   TranscriptMessageRecord,
   TranscriptMessageStore,
+  TryAcquireRunAdmissionResult,
+  TryStartRunResult,
 } from './stores.js';
+import type { SessionStatus } from './protocol.js';
 
 export interface FileStoreOptions {
   baseDir: string;
@@ -94,8 +100,28 @@ async function readAllJson<T>(dirPath: string): Promise<T[]> {
   return results;
 }
 
+class FileStoreMutex {
+  private tail = Promise.resolve();
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+}
+
 export class FileSessionStore implements SessionStore {
   private readonly dir: string;
+  private readonly mutex = new FileStoreMutex();
 
   constructor(baseDir: string) {
     this.dir = join(baseDir, 'sessions');
@@ -126,6 +152,36 @@ export class FileSessionStore implements SessionStore {
     return structuredClone(session);
   }
 
+  async tryStartRun(
+    sessionId: string,
+    patch: Partial<GatewaySessionRecord>,
+    expectedAllowedStatuses: SessionStatus[],
+  ): Promise<TryStartRunResult> {
+    return this.mutex.run(async () => {
+      const filePath = join(this.dir, `${sessionId}.json`);
+      const existing = await readJson<GatewaySessionRecord>(filePath);
+      if (!existing) {
+        return { acquired: false, reason: 'invalid_state' };
+      }
+
+      if (!expectedAllowedStatuses.includes(existing.status)) {
+        return {
+          acquired: false,
+          reason: existing.status === 'running' ? 'session_busy' : 'invalid_state',
+          session: structuredClone(existing),
+        };
+      }
+
+      const nextSession = {
+        ...existing,
+        ...patch,
+        id: existing.id,
+      };
+      await writeJson(filePath, nextSession);
+      return { acquired: true, session: structuredClone(nextSession) };
+    });
+  }
+
   async delete(sessionId: string): Promise<void> {
     await removeFile(join(this.dir, `${sessionId}.json`));
   }
@@ -135,6 +191,11 @@ export class FileSessionStore implements SessionStore {
     return allSessions
       .filter((session) => session.authSubject === authSubject)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+
+  async listAll(): Promise<GatewaySessionRecord[]> {
+    const allSessions = await readAllJson<GatewaySessionRecord>(this.dir);
+    return allSessions.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   }
 }
 
@@ -198,6 +259,13 @@ export class FileSessionRunLinkStore implements SessionRunLinkStore {
 
   async getByRunId(runId: string): Promise<SessionRunLinkRecord | undefined> {
     return readJson<SessionRunLinkRecord>(join(this.dir, `${runId}.json`));
+  }
+
+  async listByRootRunId(rootRunId: string): Promise<SessionRunLinkRecord[]> {
+    const allLinks = await readAllJson<SessionRunLinkRecord>(this.dir);
+    return allLinks
+      .filter((link) => link.rootRunId === rootRunId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.runId.localeCompare(right.runId));
   }
 
   async listBySession(sessionId: string): Promise<SessionRunLinkRecord[]> {
@@ -306,6 +374,72 @@ export class FileCronRunStore implements CronRunStore {
   }
 }
 
+export class FileRunAdmissionStore implements RunAdmissionStore {
+  private readonly dir: string;
+  private readonly mutex = new FileStoreMutex();
+
+  constructor(baseDir: string) {
+    this.dir = join(baseDir, 'run-admissions');
+  }
+
+  async tryAcquire(
+    admission: GatewayRunAdmissionRecord,
+    limits: RunAdmissionLimits,
+    now: string,
+  ): Promise<TryAcquireRunAdmissionResult> {
+    return this.mutex.run(async () => {
+      await ensureDir(this.dir);
+      const active = await this.listActive(now);
+      const totalCount = active.length;
+      if (totalCount >= limits.maxActiveRuns) {
+        return { acquired: false, limit: 'maxActiveRuns', activeCount: totalCount };
+      }
+
+      if (admission.tenantId) {
+        const tenantCount = active.filter((entry) => entry.tenantId === admission.tenantId).length;
+        if (tenantCount >= limits.maxActiveRunsPerTenant) {
+          return { acquired: false, limit: 'maxActiveRunsPerTenant', activeCount: tenantCount };
+        }
+      }
+
+      const agentCount = active.filter((entry) => entry.agentId === admission.agentId).length;
+      if (agentCount >= limits.maxActiveRunsPerAgent) {
+        return { acquired: false, limit: 'maxActiveRunsPerAgent', activeCount: agentCount };
+      }
+
+      const filePath = join(this.dir, `${admission.id}.json`);
+      const existing = await readJson<GatewayRunAdmissionRecord>(filePath);
+      if (existing) {
+        throw new Error(`Run admission "${admission.id}" already exists.`);
+      }
+
+      await writeJson(filePath, admission);
+      return { acquired: true, admission: structuredClone(admission) };
+    });
+  }
+
+  async release(admissionId: string, now: string): Promise<void> {
+    const filePath = join(this.dir, `${admissionId}.json`);
+    const existing = await readJson<GatewayRunAdmissionRecord>(filePath);
+    if (!existing) {
+      return;
+    }
+
+    await writeJson(filePath, {
+      ...existing,
+      status: 'released',
+      updatedAt: now,
+    });
+  }
+
+  async listActive(now: string): Promise<GatewayRunAdmissionRecord[]> {
+    const allAdmissions = await readAllJson<GatewayRunAdmissionRecord>(this.dir);
+    return allAdmissions
+      .filter((admission) => admission.status === 'running' && admission.leaseExpiresAt > now)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+}
+
 export function createFileGatewayStores(options: FileStoreOptions): GatewayStores {
   return {
     sessions: new FileSessionStore(options.baseDir),
@@ -313,5 +447,6 @@ export function createFileGatewayStores(options: FileStoreOptions): GatewayStore
     sessionRunLinks: new FileSessionRunLinkStore(options.baseDir),
     cronJobs: new FileCronJobStore(options.baseDir),
     cronRuns: new FileCronRunStore(options.baseDir),
+    runAdmissions: new FileRunAdmissionStore(options.baseDir),
   };
 }

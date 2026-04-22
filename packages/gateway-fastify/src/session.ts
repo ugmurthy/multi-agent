@@ -23,6 +23,13 @@ export interface AssertGatewaySessionWriteAllowedOptions {
   allowPendingApprovalRunId?: string;
 }
 
+export interface TryAcquireGatewaySessionRunOptions {
+  stores: GatewayStores;
+  requestType: string;
+  patch: Partial<GatewaySessionRecord>;
+  expectedAllowedStatuses?: GatewaySessionRecord['status'][];
+}
+
 export async function openGatewaySession(
   frame: SessionOpenFrame,
   options: OpenGatewaySessionOptions,
@@ -229,4 +236,65 @@ export function assertGatewaySessionWriteAllowed(
       },
     );
   }
+}
+
+export async function tryAcquireGatewaySessionRun(
+  session: GatewaySessionRecord,
+  options: TryAcquireGatewaySessionRunOptions,
+): Promise<GatewaySessionRecord> {
+  const result = await options.stores.sessions.tryStartRun(
+    session.id,
+    options.patch,
+    options.expectedAllowedStatuses ?? ['idle', 'failed'],
+  );
+
+  if (result.acquired) {
+    return result.session;
+  }
+
+  if (result.reason === 'session_busy') {
+    throw new ProtocolValidationError(
+      'session_busy',
+      `Session "${session.id}" already has an active root run and cannot accept frame type "${options.requestType}".`,
+      {
+        requestType: options.requestType,
+        details: {
+          sessionId: session.id,
+          status: result.session?.status ?? session.status,
+          currentRunId: result.session?.currentRunId ?? session.currentRunId ?? null,
+          currentRootRunId: result.session?.currentRootRunId ?? session.currentRootRunId ?? null,
+        },
+      },
+    );
+  }
+
+  if (result.session?.status === 'awaiting_approval') {
+    throw new ProtocolValidationError(
+      'approval_required',
+      `Session "${session.id}" is awaiting approval and only approval.resolve may mutate it.`,
+      {
+        requestType: options.requestType,
+        details: {
+          sessionId: session.id,
+          status: result.session.status,
+          currentRunId: result.session.currentRunId ?? null,
+          currentRootRunId: result.session.currentRootRunId ?? null,
+        },
+      },
+    );
+  }
+
+  throw new ProtocolValidationError(
+    'invalid_frame',
+    `Session "${session.id}" cannot accept frame type "${options.requestType}" while status is "${result.session?.status ?? session.status}".`,
+    {
+      requestType: options.requestType,
+      details: {
+        sessionId: session.id,
+        status: result.session?.status ?? session.status,
+        currentRunId: result.session?.currentRunId ?? session.currentRunId ?? null,
+        currentRootRunId: result.session?.currentRootRunId ?? session.currentRootRunId ?? null,
+      },
+    },
+  );
 }

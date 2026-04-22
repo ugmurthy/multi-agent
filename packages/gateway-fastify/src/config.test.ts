@@ -112,6 +112,9 @@ describe('gateway config loading', () => {
             provider: 'ollama',
             model: 'qwen3.5',
           },
+          workspaceRoot: '$HOME/.adaptiveAgent',
+          systemInstructions:
+            'You are the support manager. Delegate focused research to delegate.researcher and synthesize the final answer yourself.',
           tools: ['read_file'],
           delegates: ['researcher'],
           defaults: {
@@ -181,6 +184,10 @@ describe('gateway config loading', () => {
       id: 'support-agent',
       invocationModes: ['chat', 'run'],
       defaultInvocationMode: 'chat',
+      workspaceRoot: '$HOME/.adaptiveAgent',
+      systemInstructions:
+        'You are the support manager. Delegate focused research to delegate.researcher and synthesize the final answer yourself.',
+      delegates: ['researcher'],
       defaults: {
         researchPolicy: 'standard',
         toolBudgets: {

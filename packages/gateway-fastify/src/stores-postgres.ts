@@ -55,6 +55,12 @@ import type {
   TranscriptMessageRole,
   TranscriptMessageStore,
   GatewayInvocationKind,
+  GatewayRunAdmissionRecord,
+  RunAdmissionLimits,
+  RunAdmissionStore,
+  RunAdmissionStatus,
+  TryAcquireRunAdmissionResult,
+  TryStartRunResult,
 } from './stores.js';
 
 export interface PostgresQueryResult<T> {
@@ -104,6 +110,20 @@ interface SessionRunLinkRow {
   created_at: string;
 }
 
+interface RunAdmissionRow {
+  id: string;
+  agent_id: string;
+  tenant_id: string | null;
+  session_id: string | null;
+  root_run_id: string | null;
+  status: string;
+  lease_owner: string;
+  lease_expires_at: string;
+  metadata: JsonObject | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export const POSTGRES_SESSION_QUERIES = {
   create: `
     INSERT INTO gateway_sessions (
@@ -123,9 +143,22 @@ export const POSTGRES_SESSION_QUERIES = {
     WHERE id = $1
     RETURNING *
   `,
+  tryStartRun: `
+    UPDATE gateway_sessions SET
+      channel_id = $2, agent_id = $3, invocation_mode = $4, auth_subject = $5,
+      tenant_id = $6, status = $7, current_run_id = $8, current_root_run_id = $9,
+      last_completed_root_run_id = $10, transcript_version = $11,
+      transcript_summary = $12, metadata = $13, updated_at = $14
+    WHERE id = $1 AND status = ANY($15::text[])
+    RETURNING *
+  `,
   delete: `DELETE FROM gateway_sessions WHERE id = $1`,
   listByAuthSubject: `
     SELECT * FROM gateway_sessions WHERE auth_subject = $1
+    ORDER BY created_at ASC, id ASC
+  `,
+  listAll: `
+    SELECT * FROM gateway_sessions
     ORDER BY created_at ASC, id ASC
   `,
 } as const;
@@ -152,11 +185,61 @@ export const POSTGRES_SESSION_RUN_LINK_QUERIES = {
     RETURNING *
   `,
   getByRunId: `SELECT * FROM gateway_session_run_links WHERE run_id = $1`,
+  listByRootRunId: `
+    SELECT * FROM gateway_session_run_links WHERE root_run_id = $1
+    ORDER BY created_at ASC, run_id ASC
+  `,
   listBySession: `
     SELECT * FROM gateway_session_run_links WHERE session_id = $1
     ORDER BY created_at ASC, run_id ASC
   `,
   deleteBySession: `DELETE FROM gateway_session_run_links WHERE session_id = $1`,
+} as const;
+
+export const POSTGRES_RUN_ADMISSION_QUERIES = {
+  createIfUnderLimits: `
+    WITH admission_lock AS (
+      SELECT pg_advisory_xact_lock(hashtext('gateway_run_admissions'))
+    ),
+    active_counts AS (
+      SELECT
+        count(*)::int AS total_count,
+        count(*) FILTER (WHERE tenant_id = $3)::int AS tenant_count,
+        count(*) FILTER (WHERE agent_id = $2)::int AS agent_count
+      FROM gateway_run_admissions, admission_lock
+      WHERE status = 'running' AND lease_expires_at > $11
+    ),
+    inserted AS (
+      INSERT INTO gateway_run_admissions (
+        id, agent_id, tenant_id, session_id, root_run_id, status,
+        lease_owner, lease_expires_at, metadata, created_at, updated_at
+      )
+      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+      FROM active_counts
+      WHERE total_count < $12
+        AND ($3::text IS NULL OR tenant_count < $13)
+        AND agent_count < $14
+      RETURNING *
+    )
+    SELECT * FROM inserted
+  `,
+  activeCounts: `
+    SELECT
+      count(*)::int AS total_count,
+      count(*) FILTER (WHERE tenant_id = $1)::int AS tenant_count,
+      count(*) FILTER (WHERE agent_id = $2)::int AS agent_count
+    FROM gateway_run_admissions
+    WHERE status = 'running' AND lease_expires_at > $3
+  `,
+  release: `
+    UPDATE gateway_run_admissions SET status = 'released', updated_at = $2
+    WHERE id = $1
+  `,
+  listActive: `
+    SELECT * FROM gateway_run_admissions
+    WHERE status = 'running' AND lease_expires_at > $1
+    ORDER BY created_at ASC, id ASC
+  `,
 } as const;
 
 function sessionRowToRecord(row: SessionRow): GatewaySessionRecord {
@@ -266,6 +349,38 @@ function linkRecordToParams(link: SessionRunLinkRecord): unknown[] {
   ];
 }
 
+function runAdmissionRowToRecord(row: RunAdmissionRow): GatewayRunAdmissionRecord {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    tenantId: row.tenant_id ?? undefined,
+    sessionId: row.session_id ?? undefined,
+    rootRunId: row.root_run_id ?? undefined,
+    status: row.status as RunAdmissionStatus,
+    leaseOwner: row.lease_owner,
+    leaseExpiresAt: row.lease_expires_at,
+    metadata: row.metadata ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function runAdmissionRecordToParams(admission: GatewayRunAdmissionRecord): unknown[] {
+  return [
+    admission.id,
+    admission.agentId,
+    admission.tenantId ?? null,
+    admission.sessionId ?? null,
+    admission.rootRunId ?? null,
+    admission.status,
+    admission.leaseOwner,
+    admission.leaseExpiresAt,
+    jsonbParam(admission.metadata),
+    admission.createdAt,
+    admission.updatedAt,
+  ];
+}
+
 function jsonbParam(value: JsonValue | undefined | null): string | null {
   return value === undefined || value === null ? null : JSON.stringify(value);
 }
@@ -297,12 +412,48 @@ export class PostgresSessionStore implements SessionStore {
     return sessionRowToRecord(result.rows[0]!);
   }
 
+  async tryStartRun(
+    sessionId: string,
+    patch: Partial<GatewaySessionRecord>,
+    expectedAllowedStatuses: SessionStatus[],
+  ): Promise<TryStartRunResult> {
+    const current = await this.get(sessionId);
+    if (!current) {
+      return { acquired: false, reason: 'invalid_state' };
+    }
+
+    const nextSession: GatewaySessionRecord = {
+      ...current,
+      ...patch,
+      id: current.id,
+    };
+    const result = await this.client.query<SessionRow>(
+      POSTGRES_SESSION_QUERIES.tryStartRun,
+      [...sessionUpdateParams(nextSession), expectedAllowedStatuses],
+    );
+    if (result.rows[0]) {
+      return { acquired: true, session: sessionRowToRecord(result.rows[0]) };
+    }
+
+    const latest = await this.get(sessionId);
+    return {
+      acquired: false,
+      reason: latest?.status === 'running' ? 'session_busy' : 'invalid_state',
+      session: latest,
+    };
+  }
+
   async delete(sessionId: string): Promise<void> {
     await this.client.query(POSTGRES_SESSION_QUERIES.delete, [sessionId]);
   }
 
   async listByAuthSubject(authSubject: string): Promise<GatewaySessionRecord[]> {
     const result = await this.client.query<SessionRow>(POSTGRES_SESSION_QUERIES.listByAuthSubject, [authSubject]);
+    return result.rows.map(sessionRowToRecord);
+  }
+
+  async listAll(): Promise<GatewaySessionRecord[]> {
+    const result = await this.client.query<SessionRow>(POSTGRES_SESSION_QUERIES.listAll);
     return result.rows.map(sessionRowToRecord);
   }
 }
@@ -350,6 +501,14 @@ export class PostgresSessionRunLinkStore implements SessionRunLinkStore {
     return result.rows[0] ? linkRowToRecord(result.rows[0]) : undefined;
   }
 
+  async listByRootRunId(rootRunId: string): Promise<SessionRunLinkRecord[]> {
+    const result = await this.client.query<SessionRunLinkRow>(
+      POSTGRES_SESSION_RUN_LINK_QUERIES.listByRootRunId,
+      [rootRunId],
+    );
+    return result.rows.map(linkRowToRecord);
+  }
+
   async listBySession(sessionId: string): Promise<SessionRunLinkRecord[]> {
     const result = await this.client.query<SessionRunLinkRow>(
       POSTGRES_SESSION_RUN_LINK_QUERIES.listBySession,
@@ -363,6 +522,53 @@ export class PostgresSessionRunLinkStore implements SessionRunLinkStore {
   }
 }
 
+interface ActiveCountsRow {
+  total_count: number;
+  tenant_count: number;
+  agent_count: number;
+}
+
+export class PostgresRunAdmissionStore implements RunAdmissionStore {
+  constructor(private readonly client: PostgresClient) {}
+
+  async tryAcquire(
+    admission: GatewayRunAdmissionRecord,
+    limits: RunAdmissionLimits,
+    now: string,
+  ): Promise<TryAcquireRunAdmissionResult> {
+    const result = await this.client.query<RunAdmissionRow>(
+      POSTGRES_RUN_ADMISSION_QUERIES.createIfUnderLimits,
+      [...runAdmissionRecordToParams(admission), limits.maxActiveRuns, limits.maxActiveRunsPerTenant, limits.maxActiveRunsPerAgent],
+    );
+    if (result.rows[0]) {
+      return { acquired: true, admission: runAdmissionRowToRecord(result.rows[0]) };
+    }
+
+    const countsResult = await this.client.query<ActiveCountsRow>(POSTGRES_RUN_ADMISSION_QUERIES.activeCounts, [
+      admission.tenantId ?? null,
+      admission.agentId,
+      now,
+    ]);
+    const counts = countsResult.rows[0] ?? { total_count: 0, tenant_count: 0, agent_count: 0 };
+    if (counts.total_count >= limits.maxActiveRuns) {
+      return { acquired: false, limit: 'maxActiveRuns', activeCount: counts.total_count };
+    }
+    if (admission.tenantId && counts.tenant_count >= limits.maxActiveRunsPerTenant) {
+      return { acquired: false, limit: 'maxActiveRunsPerTenant', activeCount: counts.tenant_count };
+    }
+    return { acquired: false, limit: 'maxActiveRunsPerAgent', activeCount: counts.agent_count };
+  }
+
+  async release(admissionId: string, now: string): Promise<void> {
+    await this.client.query(POSTGRES_RUN_ADMISSION_QUERIES.release, [admissionId, now]);
+  }
+
+  async listActive(now: string): Promise<GatewayRunAdmissionRecord[]> {
+    const result = await this.client.query<RunAdmissionRow>(POSTGRES_RUN_ADMISSION_QUERIES.listActive, [now]);
+    return result.rows.map(runAdmissionRowToRecord);
+  }
+}
+
 export interface CreatePostgresGatewaySessionStoresOptions {
   client: PostgresClient;
 }
@@ -371,10 +577,12 @@ export function createPostgresSessionStores(options: CreatePostgresGatewaySessio
   sessions: PostgresSessionStore;
   transcriptMessages: PostgresTranscriptMessageStore;
   sessionRunLinks: PostgresSessionRunLinkStore;
+  runAdmissions: PostgresRunAdmissionStore;
 } {
   return {
     sessions: new PostgresSessionStore(options.client),
     transcriptMessages: new PostgresTranscriptMessageStore(options.client),
     sessionRunLinks: new PostgresSessionRunLinkStore(options.client),
+    runAdmissions: new PostgresRunAdmissionStore(options.client),
   };
 }

@@ -1,4 +1,4 @@
-import type { OutboundFrame, SessionUpdatedFrame } from '../protocol.js';
+import type { ApprovalRequestedFrame, ApprovalResolveFrame, OutboundFrame, SessionUpdatedFrame } from '../protocol.js';
 
 export type EventStreamMode = 'off' | 'compact' | 'verbose';
 
@@ -15,7 +15,9 @@ export interface ClientOptions {
   token?: string;
   message?: string;
   runGoal?: string;
+  rootRunId?: string;
   verbose: boolean;
+  autoApprove: boolean;
 }
 
 export interface Deferred<T> {
@@ -137,4 +139,32 @@ export function hydratePendingApprovalFromSessionUpdate(
     state.approvalSessionIds.delete(state.pendingApprovalRunId);
     state.pendingApprovalRunId = undefined;
   }
+}
+
+export function createAutoApprovalResolveFrame(
+  state: PendingApprovalTrackingState,
+  frame: ApprovalRequestedFrame,
+): ApprovalResolveFrame | undefined {
+  state.pendingApprovalRunId = frame.runId;
+  if (frame.sessionId) {
+    state.approvalSessionIds.set(frame.runId, frame.sessionId);
+  }
+
+  const sessionId = frame.sessionId ?? state.approvalSessionIds.get(frame.runId);
+  if (!sessionId) {
+    return undefined;
+  }
+
+  state.pendingApprovalRunId = undefined;
+  state.approvalSessionIds.delete(frame.runId);
+  return {
+    type: 'approval.resolve',
+    sessionId,
+    runId: frame.runId,
+    approved: true,
+    metadata: {
+      autoApproved: true,
+      source: 'local-client',
+    },
+  };
 }

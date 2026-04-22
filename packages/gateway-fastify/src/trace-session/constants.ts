@@ -3,14 +3,15 @@ export const DEFAULT_MESSAGE_PREVIEW_CHARS = 160;
 export const DEFAULT_TRACE_CONFIG_PATH = '~/.adaptiveAgent/config/gateway.json';
 
 export const USAGE = `Usage:
-  bun run trace-session <sessionId> [options]
-  bun run trace-session --root-run <rootRunId> [options]
-  bun run trace-session --run <runId> [options]
-  bun run trace-session --ls [options]
-  bun run trace-session --ls-sessionless [options]
-  bun run trace-session --delete [options]
-  bun run trace-session <sessionId> --usage [options]
-  bun run ./src/trace-session.ts trace-session <sessionId> [options]
+  adaptive-agent-trace-session <sessionId> [options]
+  adaptive-agent-trace-session --root-run <rootRunId> [options]
+  adaptive-agent-trace-session --run <runId> [options]
+  adaptive-agent-trace-session --ls [options]
+  adaptive-agent-trace-session --ls-sessionless [options]
+  adaptive-agent-trace-session --delete [options]
+  adaptive-agent-trace-session <sessionId> --usage [options]
+  trace-session <sessionId> [options]
+  bun run ./src/trace-session.ts <sessionId> [options]
 
 Options:
   --ls                   List sessions and associated goals, newest first.

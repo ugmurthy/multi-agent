@@ -1,0 +1,16 @@
+[
+  {
+    "task": "Get latest IPL 2026 points Table - search wider to get requisite data and double check the accuracy",
+    "role": "standard"
+  },
+  { "file": "goals/drift.txt" },
+  {
+    "task": "Get me a detailed explainer for how phasers work especially in space wars and write it to phaser.md",
+    "role": "captain"
+  },
+  { "file": "goals/architecture-ai.txt" },
+  { "file": "goals/business-strategy.txt", "role": "squeeze" },
+  { "file": "goals/cloudflare-reverse-proxy.txt" },
+  { "file": "goals/driftwood.txt" },
+  { "file": "goals/engineering.txt" }
+]

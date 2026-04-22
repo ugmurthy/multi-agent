@@ -2,15 +2,80 @@ import { describe, expect, it } from 'vitest';
 
 import {
   type FailedRunTrackingState,
+  createAutoApprovalResolveFrame,
   formatCompactAgentEventFrame,
   getInteractiveSessionMode,
+  isTopLevelTerminalRunEvent,
   parseClarifyCommand,
   parseEventsCommand,
   parseRetryCommand,
   recordFailedRunFromAgentEvent,
   recordInteractiveSession,
+  recordRootRunRetryTarget,
   selectInteractiveSession,
 } from './local-ws-client.js';
+
+describe('isTopLevelTerminalRunEvent', () => {
+  it('accepts root run completion events for the active run session', () => {
+    expect(
+      isTopLevelTerminalRunEvent(
+        {
+          type: 'agent.event',
+          eventType: 'run.completed',
+          data: {},
+          sessionId: 'run-session-1',
+          runId: 'run-1',
+        },
+        'run-session-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts root run failure events when no session id is available on the event', () => {
+    expect(
+      isTopLevelTerminalRunEvent(
+        {
+          type: 'agent.event',
+          eventType: 'run.failed',
+          data: {},
+          runId: 'run-1',
+        },
+        'run-session-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('ignores terminal events from child runs', () => {
+    expect(
+      isTopLevelTerminalRunEvent(
+        {
+          type: 'agent.event',
+          eventType: 'run.completed',
+          data: {},
+          sessionId: 'run-session-1',
+          runId: 'child-run-1',
+          parentRunId: 'root-run-1',
+        },
+        'run-session-1',
+      ),
+    ).toBe(false);
+  });
+
+  it('ignores terminal events from other sessions', () => {
+    expect(
+      isTopLevelTerminalRunEvent(
+        {
+          type: 'agent.event',
+          eventType: 'run.completed',
+          data: {},
+          sessionId: 'run-session-2',
+          runId: 'run-2',
+        },
+        'run-session-1',
+      ),
+    ).toBe(false);
+  });
+});
 
 describe('selectInteractiveSession', () => {
   it('waits to open a chat session until chat traffic actually starts', () => {
@@ -111,6 +176,72 @@ describe('recordFailedRunFromAgentEvent', () => {
 
     expect(state.lastFailedRunId).toBeUndefined();
     expect(state.failedRunSessionIds.size).toBe(0);
+  });
+});
+
+describe('recordRootRunRetryTarget', () => {
+  it('forces a root-run attachment to behave as a retryable run session', () => {
+    const state: FailedRunTrackingState & { sessionId?: string; runSessionId?: string } = {
+      sessionId: 'chat-1',
+      failedRunSessionIds: new Map<string, string>(),
+    };
+
+    recordRootRunRetryTarget(state, 'root-1', 'session-1');
+
+    expect(state.runSessionId).toBe('session-1');
+    expect(state.sessionId).toBe('chat-1');
+    expect(parseRetryCommand('/retry', state.lastFailedRunId)).toBe('root-1');
+    expect(state.failedRunSessionIds.get('root-1')).toBe('session-1');
+  });
+});
+
+describe('createAutoApprovalResolveFrame', () => {
+  it('creates an approval.resolve frame and clears pending approval tracking', () => {
+    const state = {
+      approvalSessionIds: new Map<string, string>(),
+    };
+
+    expect(
+      createAutoApprovalResolveFrame(state, {
+        type: 'approval.requested',
+        runId: 'run-1',
+        rootRunId: 'run-1',
+        sessionId: 'session-1',
+        toolName: 'shell_exec',
+        reason: 'Tool requires approval.',
+      }),
+    ).toEqual({
+      type: 'approval.resolve',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      approved: true,
+      metadata: {
+        autoApproved: true,
+        source: 'local-client',
+      },
+    });
+    expect(state.pendingApprovalRunId).toBeUndefined();
+    expect(state.approvalSessionIds.size).toBe(0);
+  });
+
+  it('uses a previously tracked session id when the approval frame omits it', () => {
+    const state = {
+      pendingApprovalRunId: 'run-1',
+      approvalSessionIds: new Map<string, string>([['run-1', 'session-1']]),
+    };
+
+    expect(
+      createAutoApprovalResolveFrame(state, {
+        type: 'approval.requested',
+        runId: 'run-1',
+        rootRunId: 'run-1',
+      }),
+    ).toMatchObject({
+      type: 'approval.resolve',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      approved: true,
+    });
   });
 });
 

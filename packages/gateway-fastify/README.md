@@ -124,9 +124,11 @@ bun run gateway:ws-client --run "Summarize this repository"
 The launcher uses these paths:
 
 - gateway store base dir: `~/.adaptiveAgent/data/gateway`
+- file tool root: `~/.adaptiveAgent/artifacts`
 - gateway config: `~/.adaptiveAgent/config/gateway.json`
 - agent config dir: `~/.adaptiveAgent/agents`
 - default agent config: `~/.adaptiveAgent/agents/default-agent.json`
+- log agent config: `~/.adaptiveAgent/agents/log-agent.json`
 
 The generated default agent uses:
 
@@ -134,9 +136,11 @@ The generated default agent uses:
 - `model: "qwen/qwen3.5-27b"`
 - `apiKey: process.env.MESH_API_KEY` at generation time
 - `systemInstructions: "You are a helpful assistant and you names is adaptiveAgent "`
-- built-in local tools: `read_file`, `list_directory`, `write_file`, `shell_exec`, `web_search`, `read_web_page`
-- delegate loading from `~/.adaptiveAgent/skills` first, then the repository's bundled `examples/skills`
+- built-in local tools rooted at `~/.adaptiveAgent/artifacts`: `read_file`, `list_directory`, `write_file`, `shell_exec`, `web_search`, `read_web_page`
+- delegate loading from `~/.adaptiveAgent/gateway/skills`
 - gateway auth provider `jwt` with `secret: process.env.GATEWAY_JWT_SECRET ?? "adaptive-agent-local-dev-secret"`
+
+The launcher also creates a `log-agent` by copying the default agent shape, setting `workspaceRoot` to `$HOME/.adaptiveAgent`, and enabling the built-in local tools for that agent. Agent `workspaceRoot` values expand environment variables such as `$HOME` and `${HOME}` when the agent is materialized. That makes `read_file`, `list_directory`, `write_file`, and `shell_exec` default to the adaptive-agent home while leaving the default agent rooted at `~/.adaptiveAgent/artifacts`.
 
 The JWT helper reads `auth.secret`, `auth.issuer`, `auth.audience`, `auth.tenantIdClaim`, and `auth.rolesClaim` from the local gateway config when present, so minted tokens stay aligned with your local auth configuration.
 
@@ -182,6 +186,12 @@ File: `config/gateway.json`
     "enabled": true,
     "schedulerLeaseMs": 60000,
     "maxConcurrentJobs": 5
+  },
+  "concurrency": {
+    "maxActiveRuns": 16,
+    "maxActiveRunsPerTenant": 8,
+    "maxActiveRunsPerAgent": 8,
+    "runAdmissionLeaseMs": 1800000
   },
   "transcript": {
     "recentMessageWindow": 20,
@@ -249,6 +259,10 @@ File: `config/gateway.json`
 | `cron.enabled` | No | Enable the scheduler loop |
 | `cron.schedulerLeaseMs` | No | Lease duration for cron claiming |
 | `cron.maxConcurrentJobs` | No | Max concurrent cron dispatches |
+| `concurrency.maxActiveRuns` | No | Gateway-wide limit for active independent root runs; defaults to `16` |
+| `concurrency.maxActiveRunsPerTenant` | No | Active root-run limit for one tenant; defaults to `8` |
+| `concurrency.maxActiveRunsPerAgent` | No | Active root-run limit for one agent; defaults to `8` |
+| `concurrency.runAdmissionLeaseMs` | No | Admission lease duration for active-run accounting; defaults to `1800000` |
 | `transcript` | No | Transcript replay policy overrides |
 | `channels.list[]` | No | Named channel definitions |
 | `bindings[]` | No | Routing bindings (channel, tenant, roles → agentId) |
@@ -294,6 +308,32 @@ File: `config/agents/<agent-id>.json`
 }
 ```
 
+### Manager Agents And Delegates
+
+Gateway bindings route a session or isolated run to one root agent. That root agent can act as a manager by declaring `systemInstructions` and a list of delegate names:
+
+```json
+{
+  "id": "strategy-manager",
+  "name": "Strategy Manager",
+  "invocationModes": ["run"],
+  "defaultInvocationMode": "run",
+  "model": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4-20250514"
+  },
+  "systemInstructions": "You are a strategy manager. Delegate evidence gathering to delegate.researcher, delegate file inspection to delegate.file-analyst when useful, and synthesize the final answer yourself.",
+  "tools": ["read_file", "list_directory"],
+  "delegates": ["researcher", "file-analyst"]
+}
+```
+
+The gateway still routes only to `strategy-manager`. The listed delegates are resolved from the module registry and exposed inside the selected AdaptiveAgent as synthetic tools such as `delegate.researcher` and `delegate.file-analyst`. Delegate calls create child runs under the same `rootRunId`; they do not trigger a second gateway route, binding match, or `beforeRunStart` hook.
+
+Root-agent `systemInstructions` should describe when to delegate and who owns the final answer. Delegate instructions should describe the specialist behavior and bounded tool scope for the child run.
+
+For local gateway startup, skills are discovered only from `~/.adaptiveAgent/gateway/skills`. The repository's `examples/skills` directory is for demos and tests and is not trusted by the gateway by default. Skill model overrides must use environment-backed credentials such as `model.apiKeyEnv: MESH_API_KEY`; inline `model.apiKey` values are rejected.
+
 ### Agent Config Fields
 
 | Field | Required | Description |
@@ -305,9 +345,9 @@ File: `config/agents/<agent-id>.json`
 | `model` | Yes | Model adapter configuration |
 | `model.provider` | Yes | One of: `openrouter`, `ollama`, `mistral`, `mesh` |
 | `model.model` | Yes | Model identifier |
-| `systemInstructions` | No | System prompt for the agent |
+| `systemInstructions` | No | System prompt for the root agent; for manager agents this should describe delegation strategy and final-answer ownership |
 | `tools` | Yes | Tool names (resolved via module registry) |
-| `delegates` | Yes | Delegate names (resolved via module registry) |
+| `delegates` | Yes | Delegate names resolved via module registry and exposed to this root agent as `delegate.*` tools |
 | `defaults` | No | Runtime defaults (maxSteps, timeouts, etc.) |
 | `routing` | No | Channel, tenant, and role constraints |
 
@@ -450,7 +490,7 @@ Bridged runtime events. Event types: `run.created`, `run.status_changed`, `run.r
 { "type": "error", "code": "session_busy", "message": "Session already has an active run", "requestType": "message.send" }
 ```
 
-Error codes: `invalid_json`, `invalid_frame`, `unknown_frame_type`, `unsupported_frame`, `auth_required`, `invalid_token`, `token_expired`, `session_not_found`, `session_forbidden`, `session_busy`, `approval_required`, `route_not_found`, `run_failed`.
+Error codes: `invalid_json`, `invalid_frame`, `unknown_frame_type`, `unsupported_frame`, `auth_required`, `invalid_token`, `token_expired`, `session_not_found`, `session_forbidden`, `session_busy`, `approval_required`, `gateway_overloaded`, `route_not_found`, `run_failed`.
 
 #### `pong`
 
@@ -478,6 +518,51 @@ Normal chat traffic cannot override routing by supplying `agentId` directly. Onl
 - `message.send` and `run.start` are rejected while a session is `running` (error code: `session_busy`)
 - Only `approval.resolve` is accepted while a session is `awaiting_approval`
 - Multiple same-principal connections can observe the same session
+- Independent sessions can run at the same time, subject to gateway admission limits
+
+`channels.defaults.sessionConcurrency` is currently `1` in the gateway contract. To run multiple jobs in parallel, open or use separate sessions, or send isolated `run.start` frames without a `sessionId`.
+
+## Run Admission And Parallel Runs
+
+The gateway now admits independent root runs through `runAdmissions`. This is separate from v1.4 child-run delegation: a manager agent may still have only one active child run per parent, but the gateway can run multiple independent root runs across sessions, tenants, and agents.
+
+Defaults:
+
+- `concurrency.maxActiveRuns`: `16`
+- `concurrency.maxActiveRunsPerTenant`: `8`
+- `concurrency.maxActiveRunsPerAgent`: `8`
+- `concurrency.runAdmissionLeaseMs`: `1800000` ms
+
+Set these in `gateway.json` under `concurrency`. A run must pass all configured limits before it starts. If a session-bound `run.start`, `message.send`, `run.retry`, `approval.resolve`, or `clarification.resolve` cannot get admission, the session is restored to its previous state. If an isolated `run.start` cannot get admission, no session state is changed.
+
+Be careful about:
+
+- provider and model rate limits, which can be lower than gateway limits
+- CPU, memory, file-tool, shell-tool, and database pressure from many runs at once
+- per-session state: one session remains a serial lane, so use distinct sessions for parallel work
+- stuck processes: expired admission leases stop stale rows from permanently blocking new work, but long-running jobs should still release admission in `finally`
+- tenant fairness: `maxActiveRunsPerTenant` only applies when auth provides a `tenantId`
+
+When a limit is exceeded, the client receives an `error` frame with `code: "gateway_overloaded"`. The error details include:
+
+```json
+{
+  "limit": "maxActiveRunsPerAgent",
+  "activeCount": 8,
+  "configuredLimit": 8,
+  "agentId": "support-agent",
+  "tenantId": "acme",
+  "sessionId": "s-1"
+}
+```
+
+Use the status endpoint to see how many runs are active:
+
+```bash
+bun run --cwd packages/gateway-fastify status
+```
+
+The `/status` response includes `activeRuns.total`, `activeRuns.byAgent`, and `activeRuns.byTenant`. The endpoint requires an authenticated principal with the `admin` role.
 
 ---
 
@@ -592,6 +677,22 @@ From the repository root:
 ```bash
 bun run gateway:logs:analyze --since 1h
 ```
+
+### CLI Bins
+
+The package exposes Bun-backed command bins for the local WebSocket client, TUI client, and trace-session reporter:
+
+```bash
+cd packages/gateway-fastify
+bun link
+
+adaptive-agent-tui --help
+adaptive-agent-ws-client --help
+adaptive-agent-trace-session --help
+```
+
+Short aliases are also available as `gateway-ws-client`, `gateway-tui`, and `trace-session`.
+After `bun link`, these commands can be run from any working directory because the bin shims point back to the package entry files.
 
 By default, the analyzer reads `~/.adaptiveAgent/data/gateway/logs` and combines `gateway-YYYY-MM-DD.log` with rotated `agent-runtime-YYYY-MM-DD.log` files. Use `--dir <path>` or repeated `--file <path>` flags for copied logs or CI artifacts.
 

@@ -4,6 +4,15 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
+  "bin": {
+    "adaptive-agent-ws-client": "./src/local-ws-client.ts",
+    "adaptive-agent-tui": "./src/local-ws-client-tui.ts",
+    "adaptive-agent-trace-session": "./src/trace-session.ts",
+    "gateway-ws-client": "./src/local-ws-client.ts",
+    "gateway-tui": "./src/local-ws-client-tui.ts",
+    "gateway-status": "./src/check-status.ts",
+    "trace-session": "./src/trace-session.ts"
+  },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun",
     "logs:analyze": "bun run ./src/analyze-logs.ts",
@@ -11,6 +20,7 @@
     "client:local": "bun run ./src/local-ws-client.ts",
     "client:tui": "bun run ./src/local-ws-client-tui.ts",
     "mint:local-jwt": "bun run ./src/mint-local-jwt.ts",
+    "status": "bun run ./src/check-status.ts",
     "start:local": "bun run ./src/start-local.ts",
     "test": "bunx vitest run",
     "test:postgres-integration": "RUN_DOCKER_INTEGRATION_TESTS=1 bunx vitest run --testTimeout 300000 --hookTimeout 300000 src/postgres-restart.integration.test.ts",

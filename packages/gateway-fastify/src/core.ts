@@ -285,6 +285,15 @@ export interface CreateBuiltinToolsOptions {
   webToolTimeoutMs?: number;
 }
 
+export const BUILTIN_LOCAL_TOOL_NAMES = [
+  'read_file',
+  'list_directory',
+  'write_file',
+  'shell_exec',
+  'web_search',
+  'read_web_page',
+] as const;
+
 export interface LoadedSkillDelegate {
   name: string;
   allowedTools: string[];

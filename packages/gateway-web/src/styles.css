@@ -644,3 +644,540 @@ label {
     max-width: 100%;
   }
 }
+
+.minimal-page {
+  min-height: 100vh;
+  overflow: hidden;
+  padding: 1rem;
+  background:
+    radial-gradient(circle at top left, rgba(18, 59, 52, 0.08), transparent 30%),
+    linear-gradient(180deg, #f4f7f5 0%, #edf2ef 100%);
+}
+
+.minimal-toolbar,
+.minimal-output-panel,
+.minimal-composer-frame,
+.minimal-connection-sheet,
+.minimal-session-shell {
+  backdrop-filter: blur(18px);
+}
+
+.minimal-session-shell {
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(207, 220, 214, 0.95);
+  border-radius: 32px;
+  box-shadow: 0 28px 60px rgba(19, 31, 28, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  height: 100%;
+  overflow: hidden;
+  padding: 0.85rem;
+}
+
+.minimal-markdown-output {
+  background: transparent;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem 1.1rem 0.35rem;
+  scrollbar-gutter: stable;
+}
+
+.minimal-markdown-output .markdown-body {
+  font-size: 0.98rem;
+}
+
+.minimal-toolbar {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(196, 211, 204, 0.95);
+  border-radius: 18px;
+  box-shadow: 0 16px 40px rgba(22, 37, 32, 0.08);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 1rem 1.1rem;
+  position: sticky;
+  top: 1rem;
+  z-index: 3;
+}
+
+.minimal-toolbar-actions,
+.minimal-output-actions,
+.minimal-status-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.minimal-connection-sheet {
+  margin-top: 1rem;
+  border-radius: 18px;
+}
+
+.minimal-output-panel {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid #dbe4df;
+  border-radius: 24px;
+  box-shadow: 0 24px 48px rgba(22, 37, 32, 0.08);
+  margin-top: 1rem;
+  overflow: hidden;
+}
+
+.minimal-output-header {
+  align-items: center;
+  background: rgba(247, 250, 248, 0.92);
+  border-bottom: 1px solid #e1e9e4;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 1rem 1.15rem;
+}
+
+.minimal-output-scroll {
+  display: grid;
+  gap: 0.9rem;
+  max-height: calc(100vh - 18rem);
+  min-height: calc(100vh - 23rem);
+  overflow: auto;
+  padding: 1.1rem 1.15rem 1.35rem;
+}
+
+.minimal-entry {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dde7e2;
+  border-radius: 18px;
+  display: grid;
+  gap: 0.7rem;
+  max-width: min(72rem, 100%);
+  padding: 1rem 1.05rem;
+}
+
+.minimal-entry.user {
+  background: #163d35;
+  border-color: #163d35;
+  color: #f4fbf8;
+  justify-self: end;
+  max-width: min(44rem, 100%);
+}
+
+.minimal-entry.system {
+  background: #eef4f1;
+}
+
+.minimal-entry.run {
+  border-color: #cfe2db;
+  box-shadow: inset 0 0 0 1px rgba(22, 112, 94, 0.06);
+}
+
+.minimal-entry-meta {
+  align-items: center;
+  color: #647872;
+  display: flex;
+  font-size: 0.72rem;
+  font-weight: 600;
+  justify-content: space-between;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.minimal-entry.user .minimal-entry-meta {
+  color: rgba(244, 251, 248, 0.72);
+}
+
+.minimal-entry p {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.markdown-body {
+  color: #1a2622;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  color: #123b34;
+  line-height: 1.2;
+  margin: 1.15rem 0 0.55rem;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body table {
+  margin: 0.7rem 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.25rem;
+}
+
+.markdown-body a {
+  color: #0c6a5b;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid #16705e;
+  color: #526761;
+  margin-left: 0;
+  padding-left: 0.95rem;
+}
+
+.markdown-body code {
+  background: #edf3f0;
+  border-radius: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.92em;
+  padding: 0.08rem 0.32rem;
+}
+
+.markdown-body pre {
+  background: #17201d;
+  border-radius: 14px;
+  color: #e7f2ed;
+  overflow: auto;
+  padding: 0.95rem;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid #dde7e2;
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+}
+
+.minimal-composer-dock {
+  height: calc(100vh - 2rem);
+  inset: 1rem auto 1rem 50%;
+  left: 50%;
+  position: fixed;
+  transform: translateX(-50%);
+  width: min(1080px, calc(100vw - 2rem));
+  z-index: 5;
+}
+
+.minimal-composer-frame {
+  background: rgba(19, 28, 26, 0.94);
+  border: 1px solid rgba(173, 197, 187, 0.35);
+  border-radius: 28px;
+  box-shadow: 0 24px 50px rgba(9, 15, 13, 0.28);
+  color: #edf7f3;
+  padding: 0.9rem 0.95rem 0.9rem;
+  position: relative;
+}
+
+.minimal-composer-top {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.minimal-control-cluster {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.45rem;
+}
+
+.minimal-mode-switch {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+}
+
+.minimal-mode-switch button {
+  background: transparent;
+  border-radius: 999px;
+  color: #a7beb6;
+  padding: 0.45rem 0.8rem;
+}
+
+.minimal-mode-switch button.selected {
+  background: #f7fbf9;
+  color: #123b34;
+}
+
+.minimal-runtime-chip {
+  background: #f7fbf9;
+  border: 1px solid #bfd0c8;
+  border-radius: 999px;
+  color: #173c33;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.76rem;
+  font-weight: 500;
+  padding: 0.32rem 0.7rem;
+  white-space: nowrap;
+}
+
+.minimal-connect-button {
+  align-items: center;
+  aspect-ratio: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: #9eb5ad;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
+  width: 2.3rem;
+}
+
+.minimal-connect-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.minimal-connect-button:disabled {
+  opacity: 0.9;
+}
+
+.minimal-connect-button.idle,
+.minimal-connect-button.closed {
+  color: #98aea7;
+}
+
+.minimal-connect-button.connecting {
+  background: rgba(255, 243, 202, 0.14);
+  border-color: rgba(255, 243, 202, 0.32);
+  color: #ffe08a;
+  box-shadow: 0 0 0 4px rgba(255, 243, 202, 0.06);
+}
+
+.minimal-connect-button.connected {
+  background: rgba(143, 240, 203, 0.14);
+  border-color: rgba(143, 240, 203, 0.4);
+  color: #8ff0cb;
+  box-shadow: 0 0 0 4px rgba(143, 240, 203, 0.08);
+}
+
+.minimal-connect-button.error {
+  background: rgba(255, 114, 87, 0.14);
+  border-color: rgba(255, 114, 87, 0.35);
+  color: #ff9b87;
+}
+
+.minimal-composer {
+  position: relative;
+}
+
+.minimal-composer textarea {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  box-shadow: none;
+  color: #edf7f3;
+  min-height: 6.75rem;
+  padding: 1rem 4.4rem 1rem 1rem;
+  resize: none;
+}
+
+.minimal-composer textarea::placeholder {
+  color: rgba(221, 236, 229, 0.62);
+}
+
+.minimal-composer textarea:focus {
+  border-color: #7bd1b1;
+  box-shadow: 0 0 0 3px rgba(123, 209, 177, 0.16);
+}
+
+.minimal-send-button {
+  align-items: center;
+  aspect-ratio: 1;
+  background: linear-gradient(135deg, #8ff0cb 0%, #2bb08d 100%);
+  border-radius: 999px;
+  bottom: 0.8rem;
+  color: #10362f;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: 0.8rem;
+  width: 2.95rem;
+}
+
+.minimal-send-button svg,
+.minimal-icon-button svg,
+.minimal-connect-button svg {
+  height: 1.15rem;
+  width: 1.15rem;
+}
+
+.minimal-status-bar {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  margin-top: 0.75rem;
+  min-height: 3.2rem;
+  overflow: hidden;
+  padding: 0.65rem 0.9rem;
+}
+
+.minimal-status-bar.pending,
+.minimal-status-bar.clarification {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.minimal-status-copy {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.minimal-status-copy strong {
+  font-size: 0.9rem;
+}
+
+.minimal-status-copy span {
+  color: #acc3ba;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.minimal-status-stack {
+  animation: minimal-status-rise 220ms ease;
+  display: grid;
+  gap: 0.22rem;
+  width: 100%;
+}
+
+.minimal-status-line {
+  color: #d8e9e2;
+  display: block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.minimal-status-line.previous {
+  color: #9cb6ac;
+}
+
+.minimal-icon-button {
+  align-items: center;
+  aspect-ratio: 1;
+  background: #edf7f3;
+  border-radius: 999px;
+  color: #153d34;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
+  width: 2.5rem;
+}
+
+.minimal-icon-button.reject {
+  background: #44241f;
+  color: #ffddd6;
+}
+
+@keyframes minimal-status-rise {
+  from {
+    opacity: 0.35;
+    transform: translateY(0.45rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1050px) {
+  .minimal-output-scroll {
+    max-height: calc(100vh - 20rem);
+  }
+}
+
+@media (max-width: 720px) {
+  .minimal-page {
+    padding: 0.7rem;
+  }
+
+  .minimal-toolbar,
+  .minimal-output-header,
+  .minimal-composer-top,
+  .minimal-status-bar.pending,
+  .minimal-status-bar.clarification {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .minimal-composer-dock {
+    height: calc(100vh - 1.4rem);
+    inset: 0.7rem auto 0.7rem 50%;
+    width: calc(100vw - 1.4rem);
+  }
+
+  .minimal-session-shell {
+    border-radius: 28px;
+    gap: 0.7rem;
+    padding: 0.7rem;
+  }
+
+  .minimal-control-cluster {
+    width: 100%;
+  }
+
+  .minimal-markdown-output {
+    padding: 0.85rem 0.85rem 0.2rem;
+  }
+
+  .minimal-output-scroll {
+    max-height: calc(100vh - 21rem);
+    min-height: calc(100vh - 25rem);
+  }
+
+  .minimal-entry,
+  .minimal-entry.user {
+    max-width: 100%;
+  }
+
+  .minimal-status-copy span {
+    white-space: normal;
+  }
+}

@@ -14,6 +14,7 @@
     "gateway:client:web:check": "bun run --cwd ./packages/gateway-web typecheck",
     "gateway:logs:analyze": "bun run ./packages/gateway-fastify/src/analyze-logs.ts",
     "gateway:mint-jwt": "bun run ./packages/gateway-fastify/src/mint-local-jwt.ts",
+    "gateway:status": "bun run ./packages/gateway-fastify/src/check-status.ts",
     "gateway:start": "bun run ./packages/gateway-fastify/src/start-local.ts"
   },
   "dependencies": {

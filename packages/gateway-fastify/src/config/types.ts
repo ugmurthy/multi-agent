@@ -82,6 +82,13 @@ export interface GatewayCronFileSyncConfig {
   intervalMs: number;
 }
 
+export interface GatewayConcurrencyConfig {
+  maxActiveRuns: number;
+  maxActiveRunsPerTenant: number;
+  maxActiveRunsPerAgent: number;
+  runAdmissionLeaseMs: number;
+}
+
 export interface GatewayTranscriptConfig {
   recentMessageWindow: number;
   summaryTriggerWindow: number;
@@ -133,6 +140,7 @@ export interface GatewayConfig {
   agentRuntimeLogging?: GatewayAgentRuntimeLoggingConfig;
   auth?: GatewayAuthConfig;
   cron?: GatewayCronConfig;
+  concurrency?: GatewayConcurrencyConfig;
   transcript?: GatewayTranscriptConfig;
   channels?: {
     defaults: GatewayChannelDefaults;
@@ -162,6 +170,7 @@ export interface AgentConfig {
   invocationModes: InvocationMode[];
   defaultInvocationMode: InvocationMode;
   model: ModelAdapterConfig;
+  workspaceRoot?: string;
   systemInstructions?: string;
   tools: string[];
   delegates: string[];

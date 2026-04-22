@@ -9,6 +9,7 @@ import {
   type GatewayBinding,
   type GatewayBindingMatch,
   type GatewayChannelConfig,
+  type GatewayConcurrencyConfig,
   type GatewayConfig,
   type GatewayCronConfig,
   type GatewayCronFileSyncConfig,
@@ -53,6 +54,7 @@ export function validateGatewayConfig(value: unknown, sourcePath: string): Gatew
   );
   const auth = parseGatewayAuthConfig(root?.auth, 'auth', issues);
   const cron = parseGatewayCronConfig(root?.cron, 'cron', issues);
+  const concurrency = parseGatewayConcurrencyConfig(root?.concurrency, 'concurrency', issues);
   const transcript = parseGatewayTranscriptConfig(root?.transcript, 'transcript', issues);
   const channels = parseGatewayChannelsConfig(root?.channels, 'channels', issues);
   const bindings = parseGatewayBindings(root?.bindings, 'bindings', issues);
@@ -84,11 +86,40 @@ export function validateGatewayConfig(value: unknown, sourcePath: string): Gatew
     agentRuntimeLogging,
     auth,
     cron,
+    concurrency,
     transcript,
     channels,
     bindings,
     defaultAgentId,
     hooks,
+  };
+}
+
+function parseGatewayConcurrencyConfig(value: unknown, path: string, issues: string[]): GatewayConcurrencyConfig {
+  if (value === undefined) {
+    return resolveGatewayConcurrencyConfig(undefined);
+  }
+
+  const concurrency = expectObject(value, path, issues);
+  return {
+    maxActiveRuns: expectOptionalPositiveInteger(concurrency?.maxActiveRuns, `${path}.maxActiveRuns`, issues) ?? 16,
+    maxActiveRunsPerTenant:
+      expectOptionalPositiveInteger(concurrency?.maxActiveRunsPerTenant, `${path}.maxActiveRunsPerTenant`, issues) ?? 8,
+    maxActiveRunsPerAgent:
+      expectOptionalPositiveInteger(concurrency?.maxActiveRunsPerAgent, `${path}.maxActiveRunsPerAgent`, issues) ?? 8,
+    runAdmissionLeaseMs:
+      expectOptionalPositiveInteger(concurrency?.runAdmissionLeaseMs, `${path}.runAdmissionLeaseMs`, issues) ?? 30 * 60 * 1000,
+  };
+}
+
+export function resolveGatewayConcurrencyConfig(
+  concurrency: GatewayConcurrencyConfig | undefined,
+): GatewayConcurrencyConfig {
+  return concurrency ?? {
+    maxActiveRuns: 16,
+    maxActiveRunsPerTenant: 8,
+    maxActiveRunsPerAgent: 8,
+    runAdmissionLeaseMs: 30 * 60 * 1000,
   };
 }
 

@@ -70,6 +70,110 @@ describe('createGatewayServer', () => {
     });
   });
 
+  it('exposes admin-only gateway load status', async () => {
+    const stores = createInMemoryGatewayStores();
+    await stores.sessions.create({
+      id: 'session-running',
+      channelId: 'webchat',
+      agentId: 'support-agent',
+      invocationMode: 'run',
+      authSubject: 'user-123',
+      tenantId: 'acme',
+      status: 'running',
+      currentRunId: 'run-1',
+      currentRootRunId: 'run-1',
+      transcriptVersion: 0,
+      createdAt: '2026-04-08T10:00:00.000Z',
+      updatedAt: '2026-04-08T10:00:00.000Z',
+    });
+    await stores.sessions.create({
+      id: 'session-awaiting',
+      channelId: 'webchat',
+      agentId: 'support-agent',
+      invocationMode: 'chat',
+      authSubject: 'user-123',
+      tenantId: 'acme',
+      status: 'awaiting_approval',
+      currentRunId: 'run-2',
+      currentRootRunId: 'run-2',
+      transcriptVersion: 0,
+      createdAt: '2026-04-08T10:01:00.000Z',
+      updatedAt: '2026-04-08T10:01:00.000Z',
+    });
+    await stores.runAdmissions.tryAcquire(
+      {
+        id: 'admission-1',
+        agentId: 'support-agent',
+        tenantId: 'acme',
+        sessionId: 'session-running',
+        status: 'running',
+        leaseOwner: 'gateway',
+        leaseExpiresAt: '2026-04-08T10:30:00.000Z',
+        createdAt: '2026-04-08T10:02:00.000Z',
+        updatedAt: '2026-04-08T10:02:00.000Z',
+      },
+      { maxActiveRuns: 10, maxActiveRunsPerTenant: 10, maxActiveRunsPerAgent: 10 },
+      '2026-04-08T10:02:00.000Z',
+    );
+    const app = await createGatewayServer(baseConfig, {
+      stores,
+      auth: createStaticAuthProvider(['admin']),
+      now: () => new Date('2026-04-08T10:03:00.000Z'),
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/status',
+      headers: { authorization: 'Bearer admin-token' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      checkedAt: '2026-04-08T10:03:00.000Z',
+      sessions: {
+        total: 2,
+        byStatus: {
+          running: 1,
+          awaiting_approval: 1,
+        },
+        running: 1,
+        awaitingApproval: 1,
+      },
+      activeRuns: {
+        total: 1,
+        byAgent: {
+          'support-agent': 1,
+        },
+        byTenant: {
+          acme: 1,
+        },
+      },
+    });
+  });
+
+  it('rejects gateway load status without the admin role', async () => {
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['member']),
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/status',
+      headers: { authorization: 'Bearer member-token' },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({
+      type: 'error',
+      code: 'session_forbidden',
+      message: 'Gateway status requires the admin role.',
+      requestType: 'upgrade',
+      details: { requiredRole: 'admin' },
+    });
+  });
+
   it('logs HTTP requests when request logging is enabled', async () => {
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -837,6 +941,83 @@ describe('createGatewayServer', () => {
     ]);
   });
 
+  it('reattaches a run session by root run id and replays failed output', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    const channelManager = createChannelSubscriptionManager();
+    const emittedFrames: OutboundFrame[] = [];
+    const postResponseTasks: Array<() => Promise<void>> = [];
+
+    await createStoredSession(stores, {
+      agentId: 'support-agent',
+      invocationMode: 'run',
+      status: 'failed',
+      lastCompletedRootRunId: 'root-failed',
+      transcriptVersion: 4,
+    });
+    await stores.sessionRunLinks.append({
+      sessionId: 'session-1',
+      runId: 'run-failed',
+      rootRunId: 'root-failed',
+      invocationKind: 'run',
+      createdAt: '2026-04-08T10:04:00.000Z',
+    });
+
+    const response = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'session.open',
+        rootRunId: 'root-failed',
+        channelId: 'webchat',
+      }),
+      {
+        authContext,
+        stores,
+        agentRegistry: createGatewayTestAgentRegistry({
+          runtimeRuns: {
+            'run-failed': {
+              id: 'run-failed',
+              rootRunId: 'root-failed',
+              status: 'failed',
+              errorMessage: 'Model timed out after 90000ms',
+            },
+          },
+        }),
+        channelManager,
+        postResponseTasks,
+        emitFrame: async (frame) => {
+          emittedFrames.push(frame);
+        },
+        now: () => new Date('2026-04-08T10:05:00.000Z'),
+      },
+    );
+
+    expect(response).toEqual({
+      type: 'session.opened',
+      sessionId: 'session-1',
+      channelId: 'webchat',
+      agentId: 'support-agent',
+      invocationMode: 'run',
+      status: 'failed',
+    });
+
+    for (const task of postResponseTasks) {
+      await task();
+    }
+
+    expect(emittedFrames).toContainEqual({
+      type: 'run.output',
+      runId: 'run-failed',
+      rootRunId: 'root-failed',
+      sessionId: 'session-1',
+      status: 'failed',
+      error: 'Model timed out after 90000ms',
+    });
+    expect(channelManager.getSubscriptions().map((subscription) => subscription.channel)).toEqual([
+      'session:session-1',
+      'agent:support-agent',
+    ]);
+  });
+
   it('retries a failed session-bound run without creating a new run', async () => {
     const stores = createInMemoryGatewayStores();
     const authContext = createAuthContext('user-123');
@@ -901,6 +1082,65 @@ describe('createGatewayServer', () => {
       currentRunId: undefined,
       currentRootRunId: undefined,
       lastCompletedRootRunId: 'root-failed',
+    });
+  });
+
+  it('retries the latest linked run when sessionless run.retry receives a root run id', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    const retry = vi.fn(async () => ({
+      status: 'success' as const,
+      runId: 'run-failed',
+      output: { retried: true },
+      stepsUsed: 2,
+      usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0 },
+    }));
+
+    await createStoredSession(stores, {
+      agentId: 'support-agent',
+      invocationMode: 'run',
+      status: 'failed',
+      currentRunId: undefined,
+      currentRootRunId: undefined,
+    });
+    await stores.sessionRunLinks.append({
+      sessionId: 'session-1',
+      runId: 'run-failed',
+      rootRunId: 'root-failed',
+      invocationKind: 'run',
+      createdAt: '2026-04-08T10:04:00.000Z',
+    });
+
+    const response = await handleGatewaySocketMessage(
+      JSON.stringify({
+        type: 'run.retry',
+        runId: 'root-failed',
+      }),
+      {
+        authContext,
+        stores,
+        agentRegistry: createGatewayTestAgentRegistry({
+          retry,
+          runtimeRuns: {
+            'run-failed': {
+              id: 'run-failed',
+              rootRunId: 'root-failed',
+              status: 'failed',
+              errorMessage: 'Model timed out after 90000ms',
+            },
+          },
+        }),
+        now: () => new Date('2026-04-08T10:05:00.000Z'),
+      },
+    );
+
+    expect(retry).toHaveBeenCalledWith('run-failed');
+    expect(response).toMatchObject({
+      type: 'run.output',
+      runId: 'run-failed',
+      rootRunId: 'root-failed',
+      sessionId: 'session-1',
+      status: 'succeeded',
     });
   });
 
@@ -1385,6 +1625,127 @@ describe('createGatewayServer', () => {
         createdAt: '2026-04-08T10:02:00.000Z',
       },
     ]);
+  });
+
+  it('rejects simultaneous same-session run.start while allowing only one launch', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    let finishRun!: () => void;
+    const run = vi.fn(
+      () =>
+        new Promise<Awaited<ReturnType<NonNullable<CreatedAdaptiveAgent['agent']['run']>>>>((resolve) => {
+          finishRun = () =>
+            resolve({
+              status: 'success',
+              runId: 'run-concurrent',
+              output: { ok: true },
+              stepsUsed: 1,
+              usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0 },
+            });
+        }),
+    );
+    const agentRegistry = createGatewayTestAgentRegistry({
+      run,
+      runtimeRuns: {
+        'run-concurrent': { id: 'run-concurrent', rootRunId: 'run-concurrent', status: 'succeeded' },
+      },
+    });
+    await createStoredSession(stores);
+
+    const context = {
+      gatewayConfig: createChatGatewayConfig(),
+      agentRegistry,
+      authContext,
+      stores,
+      now: () => new Date('2026-04-08T10:02:00.000Z'),
+    };
+    const first = handleGatewaySocketMessage(
+      JSON.stringify({ type: 'run.start', sessionId: 'session-1', goal: 'First' }),
+      context,
+    );
+    await waitUntil(() => run.mock.calls.length === 1);
+    const second = await handleGatewaySocketMessage(
+      JSON.stringify({ type: 'run.start', sessionId: 'session-1', goal: 'Second' }),
+      context,
+    );
+    finishRun();
+    const firstResponse = await first;
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(firstResponse).toMatchObject({ type: 'run.output', runId: 'run-concurrent', status: 'succeeded' });
+    expect(second).toMatchObject({
+      type: 'error',
+      code: 'session_busy',
+      requestType: 'run.start',
+      details: {
+        sessionId: 'session-1',
+        status: 'running',
+      },
+    });
+  });
+
+  it('rejects independent runs above configured gateway capacity', async () => {
+    const stores = createInMemoryGatewayStores();
+    const authContext = createAuthContext('user-123');
+    let finishRun!: () => void;
+    const run = vi.fn(
+      () =>
+        new Promise<Awaited<ReturnType<NonNullable<CreatedAdaptiveAgent['agent']['run']>>>>((resolve) => {
+          finishRun = () =>
+            resolve({
+              status: 'success',
+              runId: 'run-capacity',
+              output: { ok: true },
+              stepsUsed: 1,
+              usage: { promptTokens: 1, completionTokens: 1, estimatedCostUSD: 0 },
+            });
+        }),
+    );
+    const agentRegistry = createGatewayTestAgentRegistry({
+      run,
+      runtimeRuns: {
+        'run-capacity': { id: 'run-capacity', rootRunId: 'run-capacity', status: 'succeeded' },
+      },
+    });
+    const gatewayConfig = {
+      ...createChatGatewayConfig(),
+      concurrency: {
+        maxActiveRuns: 1,
+        maxActiveRunsPerTenant: 8,
+        maxActiveRunsPerAgent: 8,
+        runAdmissionLeaseMs: 60_000,
+      },
+    };
+    await createStoredSession(stores, { id: 'session-1' });
+    await createStoredSession(stores, { id: 'session-2' });
+
+    const first = handleGatewaySocketMessage(
+      JSON.stringify({ type: 'run.start', sessionId: 'session-1', goal: 'First' }),
+      { gatewayConfig, agentRegistry, authContext, stores, now: () => new Date('2026-04-08T10:02:00.000Z') },
+    );
+    await waitUntil(() => run.mock.calls.length === 1);
+    const second = await handleGatewaySocketMessage(
+      JSON.stringify({ type: 'run.start', sessionId: 'session-2', goal: 'Second' }),
+      { gatewayConfig, agentRegistry, authContext, stores, now: () => new Date('2026-04-08T10:02:01.000Z') },
+    );
+    finishRun();
+    await first;
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(second).toMatchObject({
+      type: 'error',
+      code: 'gateway_overloaded',
+      requestType: 'run.start',
+      details: {
+        limit: 'maxActiveRuns',
+        activeCount: 1,
+        configuredLimit: 1,
+        agentId: 'support-agent',
+        tenantId: 'acme',
+        sessionId: 'session-2',
+      },
+    });
+    expect(await stores.sessions.get('session-2')).toMatchObject({ status: 'idle', currentRunId: undefined });
   });
 
   it('forwards realtime agent events to the websocket while a session run is executing', async () => {
@@ -2506,6 +2867,21 @@ function createAuthContext(subject: string): GatewayAuthContext {
     tenantId: 'acme',
     roles: ['member'],
     claims: { sub: subject, tenantId: 'acme', roles: ['member'] },
+  };
+}
+
+function createStaticAuthProvider(roles: string[]) {
+  return {
+    definition: {
+      id: 'static',
+      authenticate: async ({ token }: { token: string }) => ({
+        subject: token,
+        tenantId: 'acme',
+        roles,
+        claims: { sub: token, tenantId: 'acme', roles },
+      }),
+    },
+    settings: {},
   };
 }
 

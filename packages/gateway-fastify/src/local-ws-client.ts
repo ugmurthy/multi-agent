@@ -3,7 +3,7 @@
 import { stdin as input, stdout as output } from 'node:process';
 import { createInterface } from 'node:readline/promises';
 
-import type { SessionOpenedFrame } from './protocol.js';
+import type { AgentEventFrame, SessionOpenedFrame } from './protocol.js';
 import { GATEWAY_CONFIG_PATH, loadLocalGatewayConnectionConfig } from './local-dev.js';
 import { mintLocalDevJwt } from './local-dev-jwt.js';
 import { formatCompactAgentEventFrame } from './local-event-format.js';
@@ -11,6 +11,7 @@ import {
   type ClientOptions,
   type EventStreamMode,
   createDeferred,
+  createAutoApprovalResolveFrame,
   hydratePendingApprovalFromSessionUpdate,
   normalizeConnectHost,
   parseCsv,
@@ -44,6 +45,7 @@ import {
 
 export { formatCompactAgentEventFrame } from './local-event-format.js';
 export type { EventStreamMode } from './local-ws-client/common.js';
+export { createAutoApprovalResolveFrame } from './local-ws-client/common.js';
 export type { FailedRunTrackingState } from './local-ws-client/interactive.js';
 export {
   getInteractiveSessionMode,
@@ -51,6 +53,7 @@ export {
   parseEventsCommand,
   parseRetryCommand,
   recordFailedRunFromAgentEvent,
+  recordRootRunRetryTarget,
   recordInteractiveSession,
   selectInteractiveSession,
 } from './local-ws-client/interactive.js';
@@ -61,6 +64,21 @@ interface ClientState extends InteractiveSessionState, FailedRunTrackingState {
   eventMode: EventStreamMode;
   approvalSessionIds: Map<string, string>;
   clarificationSessionIds: Map<string, string>;
+}
+
+const RUN_TERMINAL_EVENT_TYPES = new Set(['run.completed', 'run.failed']);
+const RUN_EVENT_TERMINAL_FALLBACK_MS = 75;
+
+export function isTopLevelTerminalRunEvent(frame: AgentEventFrame, sessionId?: string): boolean {
+  if (!RUN_TERMINAL_EVENT_TYPES.has(frame.eventType)) {
+    return false;
+  }
+
+  if (frame.parentRunId) {
+    return false;
+  }
+
+  return !sessionId || !frame.sessionId || frame.sessionId === sessionId;
 }
 
 const HELP_TEXT = `Commands:
@@ -76,6 +94,8 @@ const HELP_TEXT = `Commands:
   /exit                      close the socket and exit`;
 
 const USAGE = `Usage:
+  adaptive-agent-ws-client [options]
+  gateway-ws-client [options]
   bun run ./packages/gateway-fastify/src/local-ws-client.ts [options]
 
 Options:
@@ -92,14 +112,16 @@ Options:
   --token <jwt>              Use this JWT instead of auto-minting one
   --message <text>           Send one chat message after opening the session, then exit
   --run <goal>               Send one session-bound run.start after opening the session, then exit
+  --root-run <rootRunId>     Reattach the run session for a root run and replay its latest state
+  --auto-approve             Automatically approve tool approval requests in this client session
   --verbose                  Print every received frame as JSON
   --help                     Show this help text
 
 Examples:
-  bun run gateway:ws-client
-  bun run gateway:ws-client --message "Hello there"
-  bun run gateway:ws-client --run "Summarize the repository"
-  bun run gateway:ws-client --sub alice --tenant acme --role admin`;
+  adaptive-agent-ws-client
+  adaptive-agent-ws-client --message "Hello there"
+  adaptive-agent-ws-client --run "Summarize the repository"
+  adaptive-agent-ws-client --sub alice --tenant acme --role admin`;
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -137,7 +159,28 @@ async function main(): Promise<void> {
   let pendingSessionOpen: ReturnType<typeof createDeferred<SessionOpenedFrame>> | undefined;
   const terminalFrame = createDeferred<unknown>();
   let terminalFrameRequired = false;
+  let terminalFrameMode: 'message' | 'run' | undefined;
+  let terminalFallbackTimer: ReturnType<typeof setTimeout> | undefined;
   const closed = createDeferred<{ code: number; reason: string }>();
+
+  function resolveTerminalFrame(frame: unknown): void {
+    if (terminalFallbackTimer) {
+      clearTimeout(terminalFallbackTimer);
+      terminalFallbackTimer = undefined;
+    }
+    resolveIfPending(terminalFrame, frame);
+  }
+
+  function scheduleRunTerminalFallback(frame: AgentEventFrame): void {
+    if (terminalFrame.isSettled() || terminalFallbackTimer) {
+      return;
+    }
+
+    terminalFallbackTimer = setTimeout(() => {
+      terminalFallbackTimer = undefined;
+      resolveIfPending(terminalFrame, frame);
+    }, RUN_EVENT_TERMINAL_FALLBACK_MS);
+  }
 
   socket.addEventListener('open', () => {
     socketReady.resolve();
@@ -166,7 +209,7 @@ async function main(): Promise<void> {
       case 'message.output':
         console.log('assistant>');
         console.log(renderMarkedValue(frame.message.content));
-        resolveIfPending(terminalFrame, frame);
+        resolveTerminalFrame(frame);
         break;
       case 'run.output':
         if (frame.status === 'failed') {
@@ -198,22 +241,36 @@ async function main(): Promise<void> {
           console.log('run output>');
           console.log(renderMarkedValue(frame.output));
         }
-        resolveIfPending(terminalFrame, frame);
+        resolveTerminalFrame(frame);
         break;
       case 'approval.requested':
-        state.pendingApprovalRunId = frame.runId;
-        if (frame.sessionId) {
-          state.approvalSessionIds.set(frame.runId, frame.sessionId);
-        }
         console.log(`approval requested for run ${frame.runId}${frame.toolName ? ` (${frame.toolName})` : ''}`);
         if (frame.reason) {
           console.log(`reason: ${frame.reason}`);
         }
+        if (options.autoApprove) {
+          const approvalFrame = createAutoApprovalResolveFrame(state, frame);
+          if (approvalFrame) {
+            console.log(`auto-approving run ${frame.runId}`);
+            sendFrame(socket, approvalFrame);
+            break;
+          }
+          console.log('Unable to auto-approve: no sessionId is tracked for this approval.');
+          resolveTerminalFrame(frame);
+          break;
+        }
+        state.pendingApprovalRunId = frame.runId;
+        if (frame.sessionId) {
+          state.approvalSessionIds.set(frame.runId, frame.sessionId);
+        }
         console.log('Use /approve yes or /approve no in interactive mode.');
-        resolveIfPending(terminalFrame, frame);
+        resolveTerminalFrame(frame);
         break;
       case 'agent.event':
         recordFailedRunFromAgentEvent(state, frame);
+        if (terminalFrameMode === 'run' && isTopLevelTerminalRunEvent(frame, state.runSessionId)) {
+          scheduleRunTerminalFallback(frame);
+        }
         if (state.eventMode === 'off') {
           break;
         }
@@ -224,7 +281,7 @@ async function main(): Promise<void> {
         break;
       case 'error':
         console.log(`error[${frame.code}]: ${frame.message}`);
-        resolveIfPending(terminalFrame, frame);
+        resolveTerminalFrame(frame);
         break;
       case 'pong':
         console.log(`pong${frame.id ? ` (${frame.id})` : ''}`);
@@ -249,7 +306,7 @@ async function main(): Promise<void> {
     console.log('WebSocket error encountered.');
   });
 
-  async function openAdditionalSession(sessionId?: string): Promise<SessionOpenedFrame> {
+  async function openAdditionalSession(sessionId?: string, rootRunId?: string): Promise<SessionOpenedFrame> {
     await socketReady.promise;
     if (pendingSessionOpen) {
       throw new Error('A session.open request is already in flight. Wait for it to finish before opening another session.');
@@ -260,6 +317,7 @@ async function main(): Promise<void> {
       type: 'session.open',
       channelId: options.channel,
       ...(sessionId ? { sessionId } : {}),
+      ...(rootRunId ? { rootRunId } : {}),
     });
 
     try {
@@ -300,9 +358,15 @@ async function main(): Promise<void> {
     recordInteractiveSession(state, getInteractiveSessionMode(attachedSession), attachedSession.sessionId);
   }
 
+  if (options.rootRunId) {
+    state.lastFailedRunId = options.rootRunId;
+    console.log(`Root run selected: ${options.rootRunId}`);
+  }
+
   if (options.message) {
     const sessionId = await ensureChatSessionId();
     terminalFrameRequired = true;
+    terminalFrameMode = 'message';
     sendFrame(socket, {
       type: 'message.send',
       sessionId,
@@ -317,6 +381,7 @@ async function main(): Promise<void> {
   if (options.runGoal) {
     const runSessionId = await ensureRunSessionId();
     terminalFrameRequired = true;
+    terminalFrameMode = 'run';
     sendFrame(socket, {
       type: 'run.start',
       sessionId: runSessionId,
@@ -384,12 +449,12 @@ async function main(): Promise<void> {
       if (line === '/retry' || line.startsWith('/retry ')) {
         const runId = parseRetryCommand(line, state.lastFailedRunId);
         const retrySessionId = state.failedRunSessionIds.get(runId) ?? state.runSessionId;
-        if (!retrySessionId) {
+        if (!retrySessionId && runId !== options.rootRunId) {
           throw new Error(`No run sessionId is tracked for run "${runId}". Reattach the run session or pass a runId from this client session.`);
         }
         sendFrame(socket, {
           type: 'run.retry',
-          sessionId: retrySessionId,
+          ...(retrySessionId ? { sessionId: retrySessionId } : {}),
           runId,
         });
         continue;
@@ -464,7 +529,9 @@ async function parseArgs(args: string[]): Promise<ClientOptions> {
     token: undefined,
     message: undefined,
     runGoal: undefined,
+    rootRunId: undefined,
     verbose: false,
+    autoApprove: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -524,16 +591,23 @@ async function parseArgs(args: string[]): Promise<ClientOptions> {
         options.runGoal = requireValue(arg, args[index + 1]);
         index += 1;
         break;
+      case '--root-run':
+        options.rootRunId = requireValue(arg, args[index + 1]);
+        index += 1;
+        break;
       case '--verbose':
         options.verbose = true;
+        break;
+      case '--auto-approve':
+        options.autoApprove = true;
         break;
       default:
         throw new Error(`Unknown argument: ${arg}\n\n${USAGE}`);
     }
   }
 
-  if (options.message && options.runGoal) {
-    throw new Error('Use only one of --message or --run.');
+  if ([options.message, options.runGoal, options.rootRunId].filter(Boolean).length > 1) {
+    throw new Error('Use only one of --message, --run, or --root-run.');
   }
 
   options.roles = [...new Set(options.roles)];

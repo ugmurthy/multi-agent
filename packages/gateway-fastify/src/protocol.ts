@@ -36,6 +36,7 @@ export const PROTOCOL_ERROR_CODES = [
   'session_forbidden',
   'session_busy',
   'approval_required',
+  'gateway_overloaded',
   'route_not_found',
   'run_failed',
 ] as const;
@@ -48,6 +49,7 @@ export type SessionStatus = 'idle' | 'running' | 'awaiting_approval' | 'closed' 
 export interface SessionOpenFrame {
   type: 'session.open';
   sessionId?: string;
+  rootRunId?: string;
   channelId: string;
   metadata?: JsonObject;
 }
@@ -71,7 +73,7 @@ export interface RunStartFrame {
 
 export interface RunRetryFrame {
   type: 'run.retry';
-  sessionId: string;
+  sessionId?: string;
   runId: string;
   metadata?: JsonObject;
 }
@@ -281,7 +283,7 @@ export function validateInboundFrame(value: unknown): InboundFrame {
 function validateRunRetryFrame(frame: Record<string, unknown>, issues: string[]): RunRetryFrame {
   const validatedFrame: RunRetryFrame = {
     type: 'run.retry',
-    sessionId: expectNonEmptyString(frame.sessionId, 'frame.sessionId', issues) ?? 'invalid-session-id',
+    sessionId: expectOptionalNonEmptyString(frame.sessionId, 'frame.sessionId', issues),
     runId: expectNonEmptyString(frame.runId, 'frame.runId', issues) ?? 'invalid-run-id',
     metadata: expectOptionalJsonObject(frame.metadata, 'frame.metadata', issues),
   };
@@ -322,6 +324,7 @@ function validateSessionOpenFrame(frame: Record<string, unknown>, issues: string
   const validatedFrame: SessionOpenFrame = {
     type: 'session.open',
     sessionId: expectOptionalNonEmptyString(frame.sessionId, 'frame.sessionId', issues),
+    rootRunId: expectOptionalNonEmptyString(frame.rootRunId, 'frame.rootRunId', issues),
     channelId: expectNonEmptyString(frame.channelId, 'frame.channelId', issues) ?? 'invalid-channel-id',
     metadata: expectOptionalJsonObject(frame.metadata, 'frame.metadata', issues),
   };

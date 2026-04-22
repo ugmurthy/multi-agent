@@ -1,6 +1,7 @@
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
+import { marked } from 'marked';
 
 import { GatewayWebClient, loadGatewayDefaults, mintDevToken } from '../gateway/client';
 import {
@@ -70,15 +71,17 @@ export function App(): ReactElement {
   const [identity, setIdentity] = useState<GatewayIdentity>(defaultIdentity);
   const [customToken, setCustomToken] = useState('');
   const [useDevToken, setUseDevToken] = useState(true);
-  const [showConnect, setShowConnect] = useState(true);
-  const [composerMode, setComposerMode] = useState<ComposerMode>('chat');
+  const [showConnect, setShowConnect] = useState(readRoute() !== 'new');
+  const [composerMode, setComposerMode] = useState<ComposerMode>(readRoute() === 'new' ? 'run' : 'chat');
   const [composerText, setComposerText] = useState('');
   const [clarificationText, setClarificationText] = useState('');
   const [traceView, setTraceView] = useState<TraceView>('overview');
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState('');
+  const [clockTick, setClockTick] = useState(() => Date.now());
   const clientRef = useRef<GatewayWebClient | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const outputRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -132,6 +135,18 @@ export function App(): ReactElement {
     };
   }, []);
 
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setClockTick(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    if (route === 'new') {
+      setShowConnect(false);
+      setComposerMode((current) => (current === 'chat' ? 'run' : current));
+    }
+  }, [route]);
+
   const activeRun = useMemo(() => {
     if (state.session.activeRootRunId) {
       return state.runs.find((run) => run.rootRunId === state.session.activeRootRunId) ?? state.runs[0];
@@ -142,7 +157,23 @@ export function App(): ReactElement {
     return state.runs[0];
   }, [state.runs, state.session.activeRootRunId, state.session.activeRunId]);
 
-  async function connect(): Promise<void> {
+  const minimalOutputMarkdown = useMemo(() => buildMinimalOutputMarkdown(state), [state]);
+  const statusLines = useMemo(() => buildStatusLines(state), [state]);
+  const exportName = useMemo(() => buildExportFileStem(state), [state]);
+
+  useEffect(() => {
+    const node = outputRef.current;
+    if (!node) {
+      return;
+    }
+
+    node.scrollTo({
+      top: node.scrollHeight,
+      behavior: 'auto',
+    });
+  }, [minimalOutputMarkdown]);
+
+  async function connect(options: { openSession?: boolean } = {}): Promise<boolean> {
     setIsConnecting(true);
     setError('');
     dispatch({ type: 'reset-live' });
@@ -170,14 +201,18 @@ export function App(): ReactElement {
         onSessionIdsChange: (sessionIds) => dispatch({ type: 'session.ids', ...sessionIds }),
       });
       clientRef.current = client;
-      await client.connect();
+      await client.connect({
+        openSession: options.openSession ?? route !== 'new',
+      });
       setShowConnect(false);
       addFeed('system', `Connected as ${identity.subject} on ${identity.channel} (${identity.tenantId}, ${identity.roles.join(', ')}).`);
+      return true;
     } catch (connectError) {
       const message = connectError instanceof Error ? connectError.message : String(connectError);
       setError(message);
       dispatch({ type: 'socket', state: 'error', detail: message });
       addFeed('system', `Connect failed: ${message}`);
+      return false;
     } finally {
       setIsConnecting(false);
     }
@@ -203,7 +238,7 @@ export function App(): ReactElement {
 
     try {
       if (composerMode === 'chat') {
-        clientRef.current.sendChat(text);
+        await clientRef.current.sendChat(text);
         addFeed('user', text);
       } else {
         await clientRef.current.startRun(text);
@@ -213,6 +248,49 @@ export function App(): ReactElement {
     } catch (sendError) {
       addFeed('system', `Send failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
     }
+  }
+
+  async function submitMinimalComposer(event: FormEvent): Promise<void> {
+    event.preventDefault();
+
+    if (state.pendingClarification) {
+      const message = composerText.trim();
+      if (!message) {
+        return;
+      }
+
+      try {
+        clientRef.current?.resolveClarification(state.pendingClarification.runId, message);
+        dispatch({ type: 'clear-attention', runId: state.pendingClarification.runId });
+        addFeed('user', `Clarification: ${message}`);
+        setComposerText('');
+      } catch (clarificationError) {
+        addFeed('system', `Clarification failed: ${clarificationError instanceof Error ? clarificationError.message : String(clarificationError)}`);
+      }
+      return;
+    }
+
+    if (!clientRef.current || state.socketState !== 'connected') {
+      const connected = await connect({ openSession: false });
+      if (!connected) {
+        return;
+      }
+    }
+
+    await submitComposer(event);
+  }
+
+  function handleMinimalConnectionButtonClick(): void {
+    if (isConnecting || state.socketState === 'connecting') {
+      return;
+    }
+
+    if (state.socketState === 'connected') {
+      disconnect();
+      return;
+    }
+
+    void connect({ openSession: false });
   }
 
   function resolveApproval(approval: PendingApproval, approved: boolean): void {
@@ -265,7 +343,7 @@ export function App(): ReactElement {
   }
 
   function navigate(nextRoute: AppRoute): void {
-    const path = nextRoute === 'history' ? '/history' : '/';
+    const path = nextRoute === 'history' ? '/history' : nextRoute === 'new' ? '/new' : '/';
     window.history.pushState({}, '', path);
     setRoute(nextRoute);
   }
@@ -278,6 +356,111 @@ export function App(): ReactElement {
         setTraceView={setTraceView}
         onBack={() => navigate('home')}
       />
+    );
+  }
+
+  if (route === 'new') {
+    const pendingApproval = state.pendingApproval;
+    const pendingClarification = state.pendingClarification;
+    const composerPlaceholder = pendingClarification
+      ? pendingClarification.message
+      : composerMode === 'chat'
+        ? 'Keep it brief. Ask, steer, refine.'
+        : 'Describe the run goal in a sentence or two.';
+    const composerActionLabel = pendingClarification ? 'Reply' : composerMode === 'chat' ? 'Send' : 'Run';
+
+    return (
+      <main className="minimal-page">
+        <div className="minimal-composer-dock">
+          <section className="minimal-session-shell" aria-label="Minimal workspace">
+            <section ref={outputRef} className="minimal-markdown-output" aria-label="Rendered session output">
+              <MarkdownBlock source={minimalOutputMarkdown} />
+            </section>
+
+            <section className="minimal-composer-frame" aria-label="Minimal composer">
+              <div className="minimal-composer-top">
+                <div className="minimal-control-cluster">
+                  <div className="minimal-mode-switch" role="group" aria-label="Composer mode">
+                    <button className={composerMode === 'run' ? 'selected' : ''} type="button" onClick={() => setComposerMode('run')}>
+                      Run
+                    </button>
+                    <button className={composerMode === 'chat' ? 'selected' : ''} type="button" onClick={() => setComposerMode('chat')}>
+                      Chat
+                    </button>
+                  </div>
+                  <button
+                    className={`minimal-connect-button ${state.socketState}`}
+                    type="button"
+                    aria-label={state.socketState === 'connected' ? 'Disconnect gateway' : 'Connect gateway'}
+                    aria-pressed={state.socketState === 'connected'}
+                    title={state.socketState === 'connected' ? 'Disconnect gateway' : state.socketState === 'connecting' ? 'Connecting gateway' : 'Connect gateway'}
+                    onClick={handleMinimalConnectionButtonClick}
+                    disabled={isConnecting || state.socketState === 'connecting'}
+                  >
+                    <ConnectionIcon state={state.socketState} />
+                  </button>
+                </div>
+                <span className="minimal-runtime-chip">{buildRuntimeLabel(activeRun, state.session.status, clockTick)}</span>
+              </div>
+
+              <form className="minimal-composer" onSubmit={(event) => void submitMinimalComposer(event)}>
+                <textarea
+                  value={composerText}
+                  onChange={(event) => setComposerText(event.target.value)}
+                  placeholder={composerPlaceholder}
+                  rows={4}
+                />
+                <button className="minimal-send-button" type="submit" aria-label={composerActionLabel} title={composerActionLabel}>
+                  <SendIcon />
+                </button>
+              </form>
+
+              {pendingApproval ? (
+                <div className="minimal-status-bar pending">
+                  <div className="minimal-status-copy">
+                    <strong>{pendingApproval.toolName ?? 'Approval required'}</strong>
+                    <span>{pendingApproval.reason ?? 'The active run is waiting for a decision.'}</span>
+                  </div>
+                  <div className="minimal-status-actions">
+                    <button
+                      className="minimal-icon-button"
+                      type="button"
+                      aria-label="Approve"
+                      title="Approve"
+                      onClick={() => resolveApproval(pendingApproval, true)}
+                    >
+                      <ApproveIcon />
+                    </button>
+                    <button
+                      className="minimal-icon-button reject"
+                      type="button"
+                      aria-label="Reject"
+                      title="Reject"
+                      onClick={() => resolveApproval(pendingApproval, false)}
+                    >
+                      <RejectIcon />
+                    </button>
+                  </div>
+                </div>
+              ) : pendingClarification ? (
+                <div className="minimal-status-bar clarification">
+                  <div className="minimal-status-copy">
+                    <strong>Clarification requested</strong>
+                    <span>{pendingClarification.message}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="minimal-status-bar">
+                  <div className="minimal-status-stack" aria-live="polite" key={statusLines.join('|')}>
+                    <span className="minimal-status-line current">{statusLines[0]}</span>
+                    <span className="minimal-status-line previous">{statusLines[1]}</span>
+                  </div>
+                </div>
+              )}
+            </section>
+          </section>
+        </div>
+      </main>
     );
   }
 
@@ -298,6 +481,9 @@ export function App(): ReactElement {
           <span className="identity-pill">{identity.channel} · {identity.roles.join(', ') || 'member'} · {identity.tenantId || 'free'}</span>
           <button className="ghost-button" type="button" onClick={() => setShowConnect((value) => !value)}>
             Connection
+          </button>
+          <button className="ghost-button" type="button" onClick={() => navigate('new')}>
+            Minimal
           </button>
           <button className="ghost-button" type="button" onClick={() => navigate('history')}>
             History
@@ -747,7 +933,69 @@ function Metric(props: { label: string; value: string }): ReactElement {
   );
 }
 
-type AppRoute = 'home' | 'history';
+type AppRoute = 'home' | 'history' | 'new';
+
+function MarkdownBlock(props: { source: string }): ReactElement {
+  const html = useMemo(() => marked.parse(props.source.trim().length > 0 ? props.source : '_No output yet._', { async: false }) as string, [props.source]);
+  return <div className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function SendIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 12h14" />
+      <path d="m12 5 7 7-7 7" />
+    </svg>
+  );
+}
+
+function ApproveIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m5 13 4 4L19 7" />
+    </svg>
+  );
+}
+
+function RejectIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m7 7 10 10" />
+      <path d="m17 7-10 10" />
+    </svg>
+  );
+}
+
+function ConnectionIcon(props: { state: LiveGatewayState['socketState'] }): ReactElement {
+  if (props.state === 'connected') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M10.5 13.5 8 16a2.8 2.8 0 1 1-4-4l2.4-2.4" />
+        <path d="M13.5 10.5 16 8a2.8 2.8 0 1 1 4 4l-2.4 2.4" />
+        <path d="m8.5 15.5 7-7" />
+      </svg>
+    );
+  }
+
+  if (props.state === 'connecting') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="2.4" />
+        <path d="M12 4a8 8 0 0 1 8 8" />
+        <path d="M12 7.5a4.5 4.5 0 0 1 4.5 4.5" />
+        <path d="M12 20a8 8 0 0 1-8-8" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10.5 13.5 8 16a2.8 2.8 0 1 1-4-4l2.4-2.4" />
+      <path d="M13.5 10.5 16 8a2.8 2.8 0 1 1 4 4l-2.4 2.4" />
+      <path d="m3 21 18-18" />
+    </svg>
+  );
+}
 
 function HistoryPage(props: {
   state: LiveGatewayState;
@@ -945,7 +1193,13 @@ function TraceContent(props: {
 }
 
 function readRoute(): AppRoute {
-  return window.location.pathname === '/history' ? 'history' : 'home';
+  if (window.location.pathname === '/history') {
+    return 'history';
+  }
+  if (window.location.pathname === '/new') {
+    return 'new';
+  }
+  return 'home';
 }
 
 const LIVE_STATE_STORAGE_KEY = 'agent-smith.gateway-web.live-state.v1';
@@ -984,4 +1238,184 @@ function reviveLiveState(state: LiveGatewayState): LiveGatewayState {
       latestEvent: run.latestEvent ? { ...run.latestEvent, timestamp: new Date(run.latestEvent.timestamp) } : undefined,
     })),
   };
+}
+
+function buildTranscriptMarkdown(state: LiveGatewayState): string {
+  const sessionId = readCurrentSessionId(state);
+  const lines = [
+    '# AgentSmith Session Export',
+    '',
+    `- Exported: ${new Date().toISOString()}`,
+    `- Session: ${sessionId ?? 'none'}`,
+    `- Status: ${state.session.status}`,
+    `- Active run: ${state.session.activeRunId ?? state.session.activeRootRunId ?? 'none'}`,
+    '',
+    '## Transcript',
+    '',
+  ];
+
+  for (const entry of state.feed) {
+    lines.push(`### ${entry.kind} · ${formatClockTime(entry.timestamp)}`);
+    lines.push('');
+    if (entry.kind === 'assistant' || entry.kind === 'run') {
+      lines.push(entry.content.trim().length > 0 ? entry.content : '_No output._');
+    } else {
+      lines.push('~~~text');
+      lines.push(entry.content);
+      lines.push('~~~');
+    }
+    lines.push('');
+  }
+
+  if (state.events.length > 0) {
+    lines.push('## Live Events');
+    lines.push('');
+    for (const event of state.events.slice(0, 40).reverse()) {
+      lines.push(`- ${formatClockTime(event.timestamp)} · ${event.compactText}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n').trim();
+}
+
+function buildMinimalOutputMarkdown(state: LiveGatewayState): string {
+  return state.feed
+    .filter((entry) => entry.kind === 'assistant' || entry.kind === 'run')
+    .map((entry) => entry.content.trim())
+    .filter((content) => content.length > 0)
+    .join('\n\n---\n\n');
+}
+
+function buildStatusLines(state: LiveGatewayState): [string, string] {
+  const latestEvents = state.events.slice(0, 2).map((event) => `${formatClockTime(event.timestamp)} · ${event.compactText}`);
+  const fallback = buildStatusFallback(state);
+
+  if (latestEvents.length === 0) {
+    return [fallback, 'Waiting for the first live event'];
+  }
+
+  if (latestEvents.length === 1) {
+    return [latestEvents[0], fallback];
+  }
+
+  return [latestEvents[0], latestEvents[1]];
+}
+
+function buildRuntimeLabel(run: RunActivity | undefined, sessionStatus: SessionStatus, now: number): string {
+  if (!run) {
+    return `session ${sessionStatus}`;
+  }
+
+  const active = run.status === 'running' || run.status === 'awaiting_approval' || sessionStatus === 'running' || sessionStatus === 'awaiting_approval';
+  const end = active ? now : run.updatedAt.getTime();
+  const label = active ? 'working' : run.status;
+  return `${label} ${formatElapsedClock(end - run.startedAt.getTime())}`;
+}
+
+function formatElapsedClock(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
+
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function buildExportFileStem(state: LiveGatewayState): string {
+  const sessionId = readCurrentSessionId(state);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `agent-smith-${sessionId ? shortId(sessionId) : 'session'}-${timestamp}`;
+}
+
+function buildStatusFallback(state: LiveGatewayState): string {
+  return `session ${state.session.status} · run ${shortId(state.session.activeRunId ?? state.session.activeRootRunId)} · socket ${state.socketState}`;
+}
+
+function readCurrentSessionId(state: LiveGatewayState): string | undefined {
+  return state.session.sessionId ?? state.session.runSessionId;
+}
+
+function downloadTextFile(filename: string, content: string, mimeType: string): void {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function openPrintPreview(markdown: string, title: string): void {
+  const printWindow = window.open('', '_blank', 'noopener,noreferrer');
+  if (!printWindow) {
+    return;
+  }
+
+  const rendered = marked.parse(markdown, { async: false }) as string;
+  printWindow.document.write(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>${title}</title>
+    <style>
+      :root {
+        color: #17201d;
+        background: #ffffff;
+        font-family: "IBM Plex Sans", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+      }
+      main {
+        margin: 0 auto;
+        max-width: 52rem;
+      }
+      h1, h2, h3 {
+        color: #123b34;
+      }
+      p, li, blockquote {
+        line-height: 1.65;
+      }
+      pre {
+        background: #f1f5f3;
+        border-radius: 12px;
+        overflow: auto;
+        padding: 1rem;
+      }
+      code {
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      td, th {
+        border: 1px solid #dce6e1;
+        padding: 0.55rem;
+        text-align: left;
+      }
+      blockquote {
+        border-left: 4px solid #16705e;
+        color: #435851;
+        margin-left: 0;
+        padding-left: 1rem;
+      }
+      @page {
+        margin: 16mm;
+      }
+    </style>
+  </head>
+  <body>
+    <main>${rendered}</main>
+  </body>
+</html>`);
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.setTimeout(() => printWindow.print(), 150);
 }

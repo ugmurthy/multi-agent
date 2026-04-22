@@ -7,6 +7,7 @@ export type TranscriptMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type CronTargetKind = 'session_event' | 'isolated_run' | 'isolated_chat';
 export type CronDeliveryMode = 'session' | 'announce' | 'webhook' | 'none';
 export type CronRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'needs_review';
+export type RunAdmissionStatus = 'running' | 'released';
 
 export interface GatewaySessionRecord {
   id: string;
@@ -78,12 +79,48 @@ export interface GatewayCronRunRecord {
   metadata?: JsonObject;
 }
 
+export interface GatewayRunAdmissionRecord {
+  id: string;
+  agentId: string;
+  tenantId?: string;
+  sessionId?: string;
+  rootRunId?: string;
+  status: RunAdmissionStatus;
+  leaseOwner: string;
+  leaseExpiresAt: string;
+  metadata?: JsonObject;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RunAdmissionLimits {
+  maxActiveRuns: number;
+  maxActiveRunsPerTenant: number;
+  maxActiveRunsPerAgent: number;
+}
+
+export type RunAdmissionLimitName = keyof RunAdmissionLimits;
+
+export type TryStartRunResult =
+  | { acquired: true; session: GatewaySessionRecord }
+  | { acquired: false; reason: 'session_busy' | 'invalid_state'; session?: GatewaySessionRecord };
+
+export type TryAcquireRunAdmissionResult =
+  | { acquired: true; admission: GatewayRunAdmissionRecord }
+  | { acquired: false; limit: RunAdmissionLimitName; activeCount: number };
+
 export interface SessionStore {
   create(session: GatewaySessionRecord): Promise<GatewaySessionRecord>;
   get(sessionId: string): Promise<GatewaySessionRecord | undefined>;
   update(session: GatewaySessionRecord): Promise<GatewaySessionRecord>;
+  tryStartRun(
+    sessionId: string,
+    patch: Partial<GatewaySessionRecord>,
+    expectedAllowedStatuses: SessionStatus[],
+  ): Promise<TryStartRunResult>;
   delete(sessionId: string): Promise<void>;
   listByAuthSubject(authSubject: string): Promise<GatewaySessionRecord[]>;
+  listAll(): Promise<GatewaySessionRecord[]>;
 }
 
 export interface TranscriptMessageStore {
@@ -95,6 +132,7 @@ export interface TranscriptMessageStore {
 export interface SessionRunLinkStore {
   append(link: SessionRunLinkRecord): Promise<SessionRunLinkRecord>;
   getByRunId(runId: string): Promise<SessionRunLinkRecord | undefined>;
+  listByRootRunId(rootRunId: string): Promise<SessionRunLinkRecord[]>;
   listBySession(sessionId: string): Promise<SessionRunLinkRecord[]>;
   deleteBySession(sessionId: string): Promise<void>;
 }
@@ -115,12 +153,19 @@ export interface CronRunStore {
   findByFireTime(jobId: string, fireTime: string): Promise<GatewayCronRunRecord | undefined>;
 }
 
+export interface RunAdmissionStore {
+  tryAcquire(admission: GatewayRunAdmissionRecord, limits: RunAdmissionLimits, now: string): Promise<TryAcquireRunAdmissionResult>;
+  release(admissionId: string, now: string): Promise<void>;
+  listActive(now: string): Promise<GatewayRunAdmissionRecord[]>;
+}
+
 export interface GatewayStores {
   sessions: SessionStore;
   transcriptMessages: TranscriptMessageStore;
   sessionRunLinks: SessionRunLinkStore;
   cronJobs: CronJobStore;
   cronRuns: CronRunStore;
+  runAdmissions: RunAdmissionStore;
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -151,6 +196,33 @@ export class InMemorySessionStore implements SessionStore {
     return cloneRecord(storedSession);
   }
 
+  async tryStartRun(
+    sessionId: string,
+    patch: Partial<GatewaySessionRecord>,
+    expectedAllowedStatuses: SessionStatus[],
+  ): Promise<TryStartRunResult> {
+    const current = this.sessions.get(sessionId);
+    if (!current) {
+      return { acquired: false, reason: 'invalid_state' };
+    }
+
+    if (!expectedAllowedStatuses.includes(current.status)) {
+      return {
+        acquired: false,
+        reason: current.status === 'running' ? 'session_busy' : 'invalid_state',
+        session: cloneRecord(current),
+      };
+    }
+
+    const nextSession = cloneRecord({
+      ...current,
+      ...patch,
+      id: current.id,
+    });
+    this.sessions.set(sessionId, nextSession);
+    return { acquired: true, session: cloneRecord(nextSession) };
+  }
+
   async delete(sessionId: string): Promise<void> {
     this.sessions.delete(sessionId);
   }
@@ -158,6 +230,12 @@ export class InMemorySessionStore implements SessionStore {
   async listByAuthSubject(authSubject: string): Promise<GatewaySessionRecord[]> {
     return [...this.sessions.values()]
       .filter((session) => session.authSubject === authSubject)
+      .sort((left, right) => compareByTimestamp(left.createdAt, right.createdAt) || left.id.localeCompare(right.id))
+      .map((session) => cloneRecord(session));
+  }
+
+  async listAll(): Promise<GatewaySessionRecord[]> {
+    return [...this.sessions.values()]
       .sort((left, right) => compareByTimestamp(left.createdAt, right.createdAt) || left.id.localeCompare(right.id))
       .map((session) => cloneRecord(session));
   }
@@ -211,6 +289,13 @@ export class InMemorySessionRunLinkStore implements SessionRunLinkStore {
   async getByRunId(runId: string): Promise<SessionRunLinkRecord | undefined> {
     const link = this.linksByRunId.get(runId);
     return link ? cloneRecord(link) : undefined;
+  }
+
+  async listByRootRunId(rootRunId: string): Promise<SessionRunLinkRecord[]> {
+    return [...this.linksByRunId.values()]
+      .filter((link) => link.rootRunId === rootRunId)
+      .sort((left, right) => compareByTimestamp(left.createdAt, right.createdAt) || left.runId.localeCompare(right.runId))
+      .map((link) => cloneRecord(link));
   }
 
   async listBySession(sessionId: string): Promise<SessionRunLinkRecord[]> {
@@ -310,6 +395,58 @@ export class InMemoryCronRunStore implements CronRunStore {
   }
 }
 
+export class InMemoryRunAdmissionStore implements RunAdmissionStore {
+  private readonly admissions = new Map<string, GatewayRunAdmissionRecord>();
+
+  async tryAcquire(
+    admission: GatewayRunAdmissionRecord,
+    limits: RunAdmissionLimits,
+    now: string,
+  ): Promise<TryAcquireRunAdmissionResult> {
+    const active = await this.listActive(now);
+    const totalCount = active.length;
+    if (totalCount >= limits.maxActiveRuns) {
+      return { acquired: false, limit: 'maxActiveRuns', activeCount: totalCount };
+    }
+
+    if (admission.tenantId) {
+      const tenantCount = active.filter((entry) => entry.tenantId === admission.tenantId).length;
+      if (tenantCount >= limits.maxActiveRunsPerTenant) {
+        return { acquired: false, limit: 'maxActiveRunsPerTenant', activeCount: tenantCount };
+      }
+    }
+
+    const agentCount = active.filter((entry) => entry.agentId === admission.agentId).length;
+    if (agentCount >= limits.maxActiveRunsPerAgent) {
+      return { acquired: false, limit: 'maxActiveRunsPerAgent', activeCount: agentCount };
+    }
+
+    const storedAdmission = cloneRecord(admission);
+    this.admissions.set(storedAdmission.id, storedAdmission);
+    return { acquired: true, admission: cloneRecord(storedAdmission) };
+  }
+
+  async release(admissionId: string, now: string): Promise<void> {
+    const current = this.admissions.get(admissionId);
+    if (!current) {
+      return;
+    }
+
+    this.admissions.set(admissionId, {
+      ...current,
+      status: 'released',
+      updatedAt: now,
+    });
+  }
+
+  async listActive(now: string): Promise<GatewayRunAdmissionRecord[]> {
+    return [...this.admissions.values()]
+      .filter((admission) => admission.status === 'running' && admission.leaseExpiresAt > now)
+      .sort((left, right) => compareByTimestamp(left.createdAt, right.createdAt) || left.id.localeCompare(right.id))
+      .map((admission) => cloneRecord(admission));
+  }
+}
+
 export function createInMemoryGatewayStores(): GatewayStores {
   return {
     sessions: new InMemorySessionStore(),
@@ -317,6 +454,7 @@ export function createInMemoryGatewayStores(): GatewayStores {
     sessionRunLinks: new InMemorySessionRunLinkStore(),
     cronJobs: new InMemoryCronJobStore(),
     cronRuns: new InMemoryCronRunStore(),
+    runAdmissions: new InMemoryRunAdmissionStore(),
   };
 }
 

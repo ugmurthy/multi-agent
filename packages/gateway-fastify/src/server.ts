@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import websocket from '@fastify/websocket';
 
 import type { AgentRegistry } from './agent-registry.js';
 import {
   GatewayAuthError,
+  authenticateGatewayHttpRequest,
   authenticateGatewayUpgrade,
   createAuthErrorFrame,
   type GatewayAuthContext,
@@ -325,7 +326,74 @@ export async function createGatewayServer(
     }));
   }
 
+  const statusHandler = async (request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const authContext = await authenticateGatewayHttpRequest({
+        auth: options.auth,
+        headers: request.headers,
+      });
+
+      if (!authContext) {
+        throw new GatewayAuthError('auth_required', 'Gateway status requires an authenticated admin principal.', {
+          statusCode: 401,
+        });
+      }
+
+      if (!authContext.roles.includes('admin')) {
+        throw new GatewayAuthError('session_forbidden', 'Gateway status requires the admin role.', {
+          statusCode: 403,
+          details: { requiredRole: 'admin' },
+        });
+      }
+
+      return await buildGatewayStatusReport(stores, options.now);
+    } catch (error) {
+      if (error instanceof GatewayAuthError) {
+        return reply.code(error.statusCode).send(createAuthErrorFrame(error));
+      }
+
+      throw error;
+    }
+  };
+
+  app.get('/status', statusHandler);
+
   return app;
+}
+
+async function buildGatewayStatusReport(stores: GatewayStores, nowFactory: (() => Date) | undefined): Promise<JsonObject> {
+  const checkedAt = (nowFactory ?? (() => new Date()))().toISOString();
+  const [sessions, activeAdmissions] = await Promise.all([
+    stores.sessions.listAll(),
+    stores.runAdmissions.listActive(checkedAt),
+  ]);
+  const sessionCountsByStatus = countBy(sessions, (session) => session.status);
+  const activeRunsByAgent = countBy(activeAdmissions, (admission) => admission.agentId);
+  const activeRunsByTenant = countBy(activeAdmissions, (admission) => admission.tenantId ?? 'unscoped');
+
+  return {
+    checkedAt,
+    sessions: {
+      total: sessions.length,
+      byStatus: sessionCountsByStatus,
+      running: sessionCountsByStatus.running ?? 0,
+      awaitingApproval: sessionCountsByStatus.awaiting_approval ?? 0,
+    },
+    activeRuns: {
+      total: activeAdmissions.length,
+      byAgent: activeRunsByAgent,
+      byTenant: activeRunsByTenant,
+    },
+  };
+}
+
+function countBy<T>(values: T[], keyFor: (value: T) => string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) {
+    const key = keyFor(value);
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
 }
 
 export async function handleGatewaySocketMessage(
@@ -342,9 +410,35 @@ export async function handleGatewaySocketMessage(
     }
 
     if (frame.type === 'session.open' && context.stores) {
-      if (frame.sessionId) {
+      if (frame.sessionId && frame.rootRunId) {
+        throw new ProtocolValidationError(
+          'invalid_frame',
+          'Use only one of frame.sessionId or frame.rootRunId when opening a session.',
+          { requestType: frame.type },
+        );
+      }
+
+      if (frame.sessionId || frame.rootRunId) {
+        let sessionId = frame.sessionId;
+        if (frame.rootRunId) {
+          const links = await context.stores.sessionRunLinks.listByRootRunId(frame.rootRunId);
+          const latestRunLink = links.filter((link) => link.invocationKind === 'run').at(-1);
+          if (!latestRunLink) {
+            throw new ProtocolValidationError(
+              'session_not_found',
+              `No run session is linked to root run "${frame.rootRunId}".`,
+              { requestType: frame.type, details: { rootRunId: frame.rootRunId } },
+            );
+          }
+          sessionId = latestRunLink.sessionId;
+        }
+
+        if (!sessionId) {
+          throw new ProtocolValidationError('invalid_frame', 'Session resolution failed.', { requestType: frame.type });
+        }
+
         if (context.hooks) {
-          const session = await getAuthorizedGatewaySession(frame.sessionId, {
+          const session = await getAuthorizedGatewaySession(sessionId, {
             authContext: context.authContext,
             stores: context.stores,
             requestType: frame.type,
@@ -353,7 +447,7 @@ export async function handleGatewaySocketMessage(
           await executeSessionResolveHook(context.hooks, frame.type, session, context.authContext);
         }
 
-        const reconnectState = await restoreActiveSession(frame.sessionId, {
+        const reconnectState = await restoreActiveSession(sessionId, {
           stores: context.stores,
           agentRegistry: context.agentRegistry,
           authContext: context.authContext,
@@ -456,6 +550,7 @@ export async function handleGatewaySocketMessage(
 
     if (frame.type === 'run.retry' && context.stores && context.agentRegistry) {
       return await executeGatewayRunRetry(frame, {
+        gatewayConfig: context.gatewayConfig,
         agentRegistry: context.agentRegistry,
         stores: context.stores,
         authContext: context.authContext,
@@ -473,6 +568,7 @@ export async function handleGatewaySocketMessage(
 
     if (frame.type === 'approval.resolve' && context.stores && context.agentRegistry) {
       return await executeGatewayApprovalResolution(frame, {
+        gatewayConfig: context.gatewayConfig,
         agentRegistry: context.agentRegistry,
         stores: context.stores,
         authContext: context.authContext,
@@ -490,6 +586,7 @@ export async function handleGatewaySocketMessage(
 
     if (frame.type === 'clarification.resolve' && context.stores && context.agentRegistry) {
       return await executeGatewayClarificationResolution(frame, {
+        gatewayConfig: context.gatewayConfig,
         agentRegistry: context.agentRegistry,
         stores: context.stores,
         authContext: context.authContext,

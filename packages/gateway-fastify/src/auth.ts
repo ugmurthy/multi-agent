@@ -31,6 +31,11 @@ export interface GatewayUpgradeAuthenticationResult {
   isPublicChannel: boolean;
 }
 
+export interface GatewayHttpAuthenticationOptions {
+  auth?: ResolvedGatewayAuthProvider;
+  headers: Record<string, string | string[] | undefined>;
+}
+
 export interface GatewayUpgradeQuery {
   channelId?: string;
   access_token?: string;
@@ -104,6 +109,31 @@ export async function authenticateGatewayUpgrade(
     requestedChannelId,
     isPublicChannel: false,
   };
+}
+
+export async function authenticateGatewayHttpRequest(
+  options: GatewayHttpAuthenticationOptions,
+): Promise<GatewayAuthContext | undefined> {
+  if (!options.auth) {
+    return undefined;
+  }
+
+  const token = extractBearerToken(options.headers.authorization);
+  if (!token) {
+    throw new GatewayAuthError('auth_required', 'A bearer JWT is required for this HTTP request.');
+  }
+
+  const authContext = await options.auth.definition.authenticate?.({
+    token,
+    settings: options.auth.settings,
+    headers: options.headers,
+  });
+
+  if (!authContext) {
+    throw new GatewayAuthError('invalid_token', 'The configured auth provider did not return an auth context.');
+  }
+
+  return authContext;
 }
 
 export function createAuthErrorFrame(error: GatewayAuthError): ErrorFrame {

@@ -1,6 +1,7 @@
 import type { AgentRegistry } from './agent-registry.js';
+import { acquireRunAdmission, type AcquiredRunAdmission } from './admission.js';
 import type { GatewayAuthContext } from './auth.js';
-import type { GatewayConfig } from './config.js';
+import { resolveGatewayConcurrencyConfig, type GatewayConfig } from './config.js';
 import type { JsonObject, JsonValue, RunResult } from './core.js';
 import { executeHookSlot } from './hooks.js';
 import type {
@@ -16,8 +17,8 @@ import type { RealtimeEventForwardingContext } from './realtime-events.js';
 import type { ResolvedGatewayHooks } from './registries.js';
 import { withForwardedRealtimeEvents } from './realtime-events.js';
 import { resolveGatewayRoute } from './routing.js';
-import { assertGatewaySessionWriteAllowed, getAuthorizedGatewaySession } from './session.js';
-import type { GatewaySessionRecord, GatewayStores } from './stores.js';
+import { assertGatewaySessionWriteAllowed, getAuthorizedGatewaySession, tryAcquireGatewaySessionRun } from './session.js';
+import type { GatewaySessionRecord, GatewayStores, SessionRunLinkRecord } from './stores.js';
 
 export interface ExecuteGatewayRunStartOptions {
   gatewayConfig: GatewayConfig;
@@ -31,6 +32,7 @@ export interface ExecuteGatewayRunStartOptions {
 }
 
 export interface ExecuteGatewayApprovalResolutionOptions {
+  gatewayConfig?: GatewayConfig;
   agentRegistry: AgentRegistry;
   stores: GatewayStores;
   authContext?: GatewayAuthContext;
@@ -41,6 +43,7 @@ export interface ExecuteGatewayApprovalResolutionOptions {
 }
 
 export interface ExecuteGatewayClarificationResolutionOptions {
+  gatewayConfig?: GatewayConfig;
   agentRegistry: AgentRegistry;
   stores: GatewayStores;
   authContext?: GatewayAuthContext;
@@ -51,6 +54,7 @@ export interface ExecuteGatewayClarificationResolutionOptions {
 }
 
 export interface ExecuteGatewayRunRetryOptions {
+  gatewayConfig?: GatewayConfig;
   agentRegistry: AgentRegistry;
   stores: GatewayStores;
   authContext?: GatewayAuthContext;
@@ -64,7 +68,8 @@ export async function executeGatewayRunStart(
   frame: RunStartFrame,
   options: ExecuteGatewayRunStartOptions,
 ): Promise<RunOutputFrame | ApprovalRequestedFrame> {
-  const nowIso = (options.now ?? (() => new Date()))().toISOString();
+  const now = (options.now ?? (() => new Date()))();
+  const nowIso = now.toISOString();
   let effectiveMetadata = frame.metadata;
 
   if (frame.sessionId) {
@@ -107,17 +112,32 @@ export async function executeGatewayRunStart(
     });
     const effectiveFrame = effectiveMetadata === frame.metadata ? frame : { ...frame, metadata: effectiveMetadata };
 
-    const runningSession = await options.stores.sessions.update({
-      ...session,
+    const runningSession = await tryAcquireGatewaySessionRun(session, {
+      stores: options.stores,
+      requestType: frame.type,
+      expectedAllowedStatuses: ['idle', 'failed'],
+      patch: {
       agentId: route.agentId,
       invocationMode: 'run',
       status: 'running',
       currentRunId: undefined,
       currentRootRunId: undefined,
       updatedAt: nowIso,
+      },
     });
 
+    let admission: AcquiredRunAdmission | undefined;
+
     try {
+      admission = await acquireRunAdmission({
+        stores: options.stores,
+        concurrency: resolveGatewayConcurrencyConfig(options.gatewayConfig.concurrency),
+        agentId: route.agentId,
+        tenantId: runningSession.tenantId,
+        sessionId: runningSession.id,
+        requestType: frame.type,
+        now,
+      });
       const response = await executeResolvedGatewayRun(effectiveFrame, {
         agentId: route.agentId,
         session: runningSession,
@@ -141,6 +161,14 @@ export async function executeGatewayRunStart(
       return response;
     } catch (error) {
       if (error instanceof ProtocolValidationError) {
+        if (error.code === 'gateway_overloaded') {
+          await settleSession(options.stores, runningSession, {
+            status: session.status,
+            currentRunId: session.currentRunId,
+            currentRootRunId: session.currentRootRunId,
+            updatedAt: nowIso,
+          });
+        }
         throw error;
       }
 
@@ -159,6 +187,8 @@ export async function executeGatewayRunStart(
           details: { sessionId: runningSession.id, agentId: route.agentId },
         },
       );
+    } finally {
+      await admission?.release();
     }
   }
 
@@ -190,27 +220,47 @@ export async function executeGatewayRunStart(
   assertChannelAllowsInvocation(options.gatewayConfig, options.requestedChannelId, 'run', frame.type);
 
   try {
-    const response = await executeResolvedGatewayRun(effectiveFrame, {
-      agentId: route.agentId,
-      authContext: options.authContext,
-      hooks: options.hooks,
-      agentRegistry: options.agentRegistry,
+    const admission = await acquireRunAdmission({
       stores: options.stores,
-      requestedChannelId: options.requestedChannelId,
-      nowIso,
-      realtimeEvents: options.realtimeEvents,
-    });
-
-    await runAfterHook(options.hooks, frame.type, {
-      authContext: options.authContext,
+      concurrency: resolveGatewayConcurrencyConfig(options.gatewayConfig?.concurrency),
       agentId: route.agentId,
-      result: response,
-      metadata: effectiveFrame.metadata,
+      tenantId: options.authContext?.tenantId,
+      requestType: frame.type,
+      now,
     });
+    try {
+      const response = await executeResolvedGatewayRun(effectiveFrame, {
+        agentId: route.agentId,
+        authContext: options.authContext,
+        hooks: options.hooks,
+        agentRegistry: options.agentRegistry,
+        stores: options.stores,
+        requestedChannelId: options.requestedChannelId,
+        nowIso,
+        realtimeEvents: options.realtimeEvents,
+      });
 
-    return response;
+      await runAfterHook(options.hooks, frame.type, {
+        authContext: options.authContext,
+        agentId: route.agentId,
+        result: response,
+        metadata: effectiveFrame.metadata,
+      });
+
+      return response;
+    } finally {
+      await admission.release();
+    }
   } catch (error) {
     if (error instanceof ProtocolValidationError) {
+      if (error.code === 'gateway_overloaded') {
+        await settleSession(options.stores, runningSession, {
+          status: session.status,
+          currentRunId: session.currentRunId,
+          currentRootRunId: session.currentRootRunId,
+          updatedAt: nowIso,
+        });
+      }
       throw error;
     }
 
@@ -229,7 +279,8 @@ export async function executeGatewayApprovalResolution(
   frame: ApprovalResolveFrame,
   options: ExecuteGatewayApprovalResolutionOptions,
 ): Promise<RunOutputFrame | ApprovalRequestedFrame> {
-  const nowIso = (options.now ?? (() => new Date()))().toISOString();
+  const now = (options.now ?? (() => new Date()))();
+  const nowIso = now.toISOString();
   const session = await getAuthorizedGatewaySession(frame.sessionId, {
     authContext: options.authContext,
     stores: options.stores,
@@ -268,13 +319,27 @@ export async function executeGatewayApprovalResolution(
     );
   }
 
-  const runningSession = await options.stores.sessions.update({
-    ...session,
-    status: 'running',
-    updatedAt: nowIso,
+  const runningSession = await tryAcquireGatewaySessionRun(session, {
+    stores: options.stores,
+    requestType: frame.type,
+    expectedAllowedStatuses: ['awaiting_approval'],
+    patch: {
+      status: 'running',
+      updatedAt: nowIso,
+    },
   });
+  let admission: AcquiredRunAdmission | undefined;
 
   try {
+    admission = await acquireRunAdmission({
+      stores: options.stores,
+      concurrency: resolveGatewayConcurrencyConfig(options.gatewayConfig?.concurrency),
+      agentId,
+      tenantId: runningSession.tenantId,
+      sessionId: runningSession.id,
+      requestType: frame.type,
+      now,
+    });
     const realtimeRootRunId = session.currentRootRunId ?? frame.runId;
     const realtimeEvents = options.realtimeEvents && !options.hasRuntimeObserver?.(realtimeRootRunId)
       ? {
@@ -310,6 +375,14 @@ export async function executeGatewayApprovalResolution(
     return response;
   } catch (error) {
     if (error instanceof ProtocolValidationError) {
+      if (error.code === 'gateway_overloaded') {
+        await settleSession(options.stores, runningSession, {
+          status: session.status,
+          currentRunId: session.currentRunId,
+          currentRootRunId: session.currentRootRunId,
+          updatedAt: nowIso,
+        });
+      }
       throw error;
     }
 
@@ -332,6 +405,8 @@ export async function executeGatewayApprovalResolution(
         },
       },
     );
+  } finally {
+    await admission?.release();
   }
 }
 
@@ -339,7 +414,8 @@ export async function executeGatewayClarificationResolution(
   frame: ClarificationResolveFrame,
   options: ExecuteGatewayClarificationResolutionOptions,
 ): Promise<RunOutputFrame | ApprovalRequestedFrame> {
-  const nowIso = (options.now ?? (() => new Date()))().toISOString();
+  const now = (options.now ?? (() => new Date()))();
+  const nowIso = now.toISOString();
   const session = await getAuthorizedGatewaySession(frame.sessionId, {
     authContext: options.authContext,
     stores: options.stores,
@@ -391,15 +467,29 @@ export async function executeGatewayClarificationResolution(
     );
   }
 
-  const runningSession = await options.stores.sessions.update({
-    ...session,
-    status: 'running',
-    currentRunId: frame.runId,
-    currentRootRunId: sessionRunLink.rootRunId,
-    updatedAt: nowIso,
+  const runningSession = await tryAcquireGatewaySessionRun(session, {
+    stores: options.stores,
+    requestType: frame.type,
+    expectedAllowedStatuses: ['idle', 'failed'],
+    patch: {
+      status: 'running',
+      currentRunId: frame.runId,
+      currentRootRunId: sessionRunLink.rootRunId,
+      updatedAt: nowIso,
+    },
   });
+  let admission: AcquiredRunAdmission | undefined;
 
   try {
+    admission = await acquireRunAdmission({
+      stores: options.stores,
+      concurrency: resolveGatewayConcurrencyConfig(options.gatewayConfig?.concurrency),
+      agentId,
+      tenantId: runningSession.tenantId,
+      sessionId: runningSession.id,
+      requestType: frame.type,
+      now,
+    });
     const clarifiedResult = await withForwardedRealtimeEvents(
       agent,
       options.realtimeEvents && !options.hasRuntimeObserver?.(sessionRunLink.rootRunId)
@@ -436,6 +526,14 @@ export async function executeGatewayClarificationResolution(
     return response;
   } catch (error) {
     if (error instanceof ProtocolValidationError) {
+      if (error.code === 'gateway_overloaded') {
+        await settleSession(options.stores, runningSession, {
+          status: session.status,
+          currentRunId: session.currentRunId,
+          currentRootRunId: session.currentRootRunId,
+          updatedAt: nowIso,
+        });
+      }
       throw error;
     }
 
@@ -458,6 +556,8 @@ export async function executeGatewayClarificationResolution(
         },
       },
     );
+  } finally {
+    await admission?.release();
   }
 }
 
@@ -465,8 +565,24 @@ export async function executeGatewayRunRetry(
   frame: RunRetryFrame,
   options: ExecuteGatewayRunRetryOptions,
 ): Promise<RunOutputFrame | ApprovalRequestedFrame> {
-  const nowIso = (options.now ?? (() => new Date()))().toISOString();
-  const session = await getAuthorizedGatewaySession(frame.sessionId, {
+  const now = (options.now ?? (() => new Date()))();
+  const nowIso = now.toISOString();
+  const initialSessionRunLink =
+    (await options.stores.sessionRunLinks.getByRunId(frame.runId)) ??
+    (await resolveLatestSessionRunLinkByRootRunId(options.stores, frame.runId));
+  const resolvedSessionId = frame.sessionId ?? initialSessionRunLink?.sessionId;
+  if (!resolvedSessionId) {
+    throw new ProtocolValidationError(
+      'invalid_frame',
+      `Run "${frame.runId}" is not linked to a retryable run session.`,
+      {
+        requestType: frame.type,
+        details: { runId: frame.runId },
+      },
+    );
+  }
+
+  const session = await getAuthorizedGatewaySession(resolvedSessionId, {
     authContext: options.authContext,
     stores: options.stores,
     requestType: frame.type,
@@ -492,7 +608,9 @@ export async function executeGatewayRunRetry(
     );
   }
 
-  const sessionRunLink = await options.stores.sessionRunLinks.getByRunId(frame.runId);
+  const sessionRunLink =
+    (initialSessionRunLink?.sessionId === session.id ? initialSessionRunLink : undefined) ??
+    (await resolveSessionRunLinkByRootRunId(options.stores, session.id, frame.runId));
   if (!sessionRunLink || sessionRunLink.sessionId !== session.id || sessionRunLink.invocationKind !== 'run') {
     throw new ProtocolValidationError(
       'invalid_frame',
@@ -531,15 +649,29 @@ export async function executeGatewayRunRetry(
     );
   }
 
-  const runningSession = await options.stores.sessions.update({
-    ...session,
-    status: 'running',
-    currentRunId: frame.runId,
-    currentRootRunId: sessionRunLink.rootRunId,
-    updatedAt: nowIso,
+  const runningSession = await tryAcquireGatewaySessionRun(session, {
+    stores: options.stores,
+    requestType: frame.type,
+    expectedAllowedStatuses: ['idle', 'failed'],
+    patch: {
+      status: 'running',
+      currentRunId: sessionRunLink.runId,
+      currentRootRunId: sessionRunLink.rootRunId,
+      updatedAt: nowIso,
+    },
   });
+  let admission: AcquiredRunAdmission | undefined;
 
   try {
+    admission = await acquireRunAdmission({
+      stores: options.stores,
+      concurrency: resolveGatewayConcurrencyConfig(options.gatewayConfig?.concurrency),
+      agentId,
+      tenantId: runningSession.tenantId,
+      sessionId: runningSession.id,
+      requestType: frame.type,
+      now,
+    });
     const retryResult = await withForwardedRealtimeEvents(
       agent,
       options.realtimeEvents && !options.hasRuntimeObserver?.(sessionRunLink.rootRunId)
@@ -550,7 +682,7 @@ export async function executeGatewayRunRetry(
             rootRunId: sessionRunLink.rootRunId,
           }
         : undefined,
-      () => agent.agent.retry!(frame.runId),
+      () => agent.agent.retry!(sessionRunLink.runId),
     );
     const rootRunId = (await resolveRootRunId(agent.runtime.runStore, retryResult.runId)) ?? sessionRunLink.rootRunId ?? frame.runId;
 
@@ -597,7 +729,30 @@ export async function executeGatewayRunRetry(
         },
       },
     );
+  } finally {
+    await admission?.release();
   }
+}
+
+async function resolveSessionRunLinkByRootRunId(
+  stores: GatewayStores,
+  sessionId: string,
+  rootRunId: string,
+): Promise<SessionRunLinkRecord | undefined> {
+  const links = await stores.sessionRunLinks.listByRootRunId(rootRunId);
+  return links
+    .filter((link) => link.sessionId === sessionId && link.invocationKind === 'run')
+    .at(-1);
+}
+
+async function resolveLatestSessionRunLinkByRootRunId(
+  stores: GatewayStores,
+  rootRunId: string,
+): Promise<SessionRunLinkRecord | undefined> {
+  const links = await stores.sessionRunLinks.listByRootRunId(rootRunId);
+  return links
+    .filter((link) => link.invocationKind === 'run')
+    .at(-1);
 }
 
 interface ExecuteResolvedGatewayRunOptions {

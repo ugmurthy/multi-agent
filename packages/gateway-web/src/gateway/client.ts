@@ -15,6 +15,15 @@ interface Deferred<T> {
   isSettled: () => boolean;
 }
 
+interface ConnectOptions {
+  openSession?: boolean;
+}
+
+interface PendingSessionRequest {
+  mode: 'chat' | 'run';
+  deferred: Deferred<SessionOpenedFrame>;
+}
+
 export class GatewayWebClient {
   private readonly socketUrl: string;
   private readonly channel: string;
@@ -28,8 +37,7 @@ export class GatewayWebClient {
   private socket?: WebSocket;
   private sessionId?: string;
   private runSessionId?: string;
-  private pendingSessionOpen?: Deferred<SessionOpenedFrame>;
-  private initialSessionOpen = createDeferred<SessionOpenedFrame>();
+  private pendingSessionRequests: PendingSessionRequest[] = [];
 
   constructor(options: GatewayWebClientOptions) {
     this.socketUrl = options.socketUrl;
@@ -40,8 +48,11 @@ export class GatewayWebClient {
     this.onSessionIdsChange = options.onSessionIdsChange;
   }
 
-  connect(): Promise<SessionOpenedFrame> {
-    this.initialSessionOpen = createDeferred<SessionOpenedFrame>();
+  connect(options: ConnectOptions = {}): Promise<SessionOpenedFrame | void> {
+    const openSession = options.openSession !== false;
+    const socketOpened = createDeferred<void>();
+    const initialSessionRequest = openSession ? createPendingSessionRequest('chat') : undefined;
+    this.pendingSessionRequests = initialSessionRequest ? [initialSessionRequest] : [];
     this.notifySocketState('connecting');
 
     const socket = new WebSocket(buildUpgradeUrl(this.socketUrl, this.channel, this.token));
@@ -49,10 +60,13 @@ export class GatewayWebClient {
 
     socket.addEventListener('open', () => {
       this.notifySocketState('connected');
-      this.sendFrame({
-        type: 'session.open',
-        channelId: this.channel,
-      });
+      socketOpened.resolve();
+      if (initialSessionRequest) {
+        this.sendFrame({
+          type: 'session.open',
+          channelId: this.channel,
+        });
+      }
     });
 
     socket.addEventListener('message', (event) => {
@@ -67,28 +81,23 @@ export class GatewayWebClient {
     socket.addEventListener('close', (event) => {
       const detail = event.reason ? `${event.code}: ${event.reason}` : `${event.code}`;
       this.notifySocketState('closed', detail);
-      rejectIfPending(this.initialSessionOpen, new Error('Socket closed before session.opened was received.'));
-      if (this.pendingSessionOpen) {
-        rejectIfPending(this.pendingSessionOpen, new Error('Socket closed before the additional session was opened.'));
-        this.pendingSessionOpen = undefined;
-      }
+      rejectIfPending(socketOpened, new Error('Socket closed before the connection was established.'));
+      this.rejectPendingSessionRequests(new Error('Socket closed before the requested session was opened.'));
     });
 
-    return this.initialSessionOpen.promise;
+    return initialSessionRequest ? initialSessionRequest.deferred.promise : socketOpened.promise;
   }
 
   disconnect(code = 1000, reason = 'client disconnected'): void {
     this.socket?.close(code, reason);
   }
 
-  sendChat(content: string): void {
-    if (!this.sessionId) {
-      throw new Error('No chat session is available yet.');
-    }
+  async sendChat(content: string): Promise<void> {
+    const sessionId = await this.ensureChatSessionId();
 
     this.sendFrame({
       type: 'message.send',
-      sessionId: this.sessionId,
+      sessionId,
       content,
     });
   }
@@ -145,30 +154,38 @@ export class GatewayWebClient {
     this.clarificationSessionIds.delete(runId);
   }
 
+  private async ensureChatSessionId(): Promise<string> {
+    if (this.sessionId) {
+      return this.sessionId;
+    }
+
+    return this.requestSession('chat');
+  }
+
   private async ensureRunSessionId(): Promise<string> {
     if (this.runSessionId) {
       return this.runSessionId;
     }
 
-    if (this.pendingSessionOpen) {
-      const frame = await this.pendingSessionOpen.promise;
+    return this.requestSession('run');
+  }
+
+  private async requestSession(mode: PendingSessionRequest['mode']): Promise<string> {
+    const existing = this.pendingSessionRequests.find((request) => request.mode === mode && !request.deferred.isSettled());
+    if (existing) {
+      const frame = await existing.deferred.promise;
       return frame.sessionId;
     }
 
-    this.pendingSessionOpen = createDeferred<SessionOpenedFrame>();
+    const request = createPendingSessionRequest(mode);
+    this.pendingSessionRequests.push(request);
     this.sendFrame({
       type: 'session.open',
       channelId: this.channel,
     });
 
-    try {
-      const frame = await this.pendingSessionOpen.promise;
-      this.runSessionId = frame.sessionId;
-      this.notifySessionIds();
-      return frame.sessionId;
-    } finally {
-      this.pendingSessionOpen = undefined;
-    }
+    const frame = await request.deferred.promise;
+    return frame.sessionId;
   }
 
   private handleFrame(frame: OutboundFrame): void {
@@ -190,18 +207,25 @@ export class GatewayWebClient {
   }
 
   private trackSession(frame: SessionOpenedFrame): void {
-    if (!this.initialSessionOpen.isSettled()) {
-      this.sessionId = frame.sessionId;
-      this.initialSessionOpen.resolve(frame);
+    const request = this.pendingSessionRequests.shift();
+    if (!request) {
+      if (!this.sessionId) {
+        this.sessionId = frame.sessionId;
+      } else if (!this.runSessionId) {
+        this.runSessionId = frame.sessionId;
+      }
       this.notifySessionIds();
       return;
     }
 
-    if (this.pendingSessionOpen && !this.pendingSessionOpen.isSettled()) {
+    if (request.mode === 'chat') {
+      this.sessionId = frame.sessionId;
+    } else {
       this.runSessionId = frame.sessionId;
-      this.pendingSessionOpen.resolve(frame);
-      this.notifySessionIds();
     }
+
+    request.deferred.resolve(frame);
+    this.notifySessionIds();
   }
 
   private trackApproval(frame: ApprovalRequestedFrame): void {
@@ -240,6 +264,13 @@ export class GatewayWebClient {
       sessionId: this.sessionId,
       runSessionId: this.runSessionId,
     });
+  }
+
+  private rejectPendingSessionRequests(reason: Error): void {
+    for (const request of this.pendingSessionRequests) {
+      rejectIfPending(request.deferred, reason);
+    }
+    this.pendingSessionRequests = [];
   }
 }
 
@@ -309,6 +340,13 @@ function createDeferred<T>(): Deferred<T> {
     resolve,
     reject,
     isSettled: () => settled,
+  };
+}
+
+function createPendingSessionRequest(mode: PendingSessionRequest['mode']): PendingSessionRequest {
+  return {
+    mode,
+    deferred: createDeferred<SessionOpenedFrame>(),
   };
 }
 

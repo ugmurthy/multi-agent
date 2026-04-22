@@ -4,9 +4,11 @@ import {
   PostgresSessionStore,
   PostgresTranscriptMessageStore,
   PostgresSessionRunLinkStore,
+  PostgresRunAdmissionStore,
   POSTGRES_SESSION_QUERIES,
   POSTGRES_TRANSCRIPT_QUERIES,
   POSTGRES_SESSION_RUN_LINK_QUERIES,
+  POSTGRES_RUN_ADMISSION_QUERIES,
   createPostgresSessionStores,
   type PostgresClient,
   type PostgresQueryResult,
@@ -178,6 +180,73 @@ describe('PostgresSessionStore', () => {
     ).rejects.toThrow('does not exist');
   });
 
+  it('conditionally starts a session only from allowed statuses', async () => {
+    const rows = [
+      {
+        id: 'session-1',
+        channel_id: 'webchat',
+        agent_id: null,
+        invocation_mode: null,
+        auth_subject: 'user-123',
+        tenant_id: null,
+        status: 'idle',
+        current_run_id: null,
+        current_root_run_id: null,
+        last_completed_root_run_id: null,
+        transcript_version: 0,
+        transcript_summary: null,
+        metadata: null,
+        created_at: '2026-04-08T10:00:00.000Z',
+        updated_at: '2026-04-08T10:00:00.000Z',
+      },
+      {
+        id: 'session-1',
+        channel_id: 'webchat',
+        agent_id: 'support-agent',
+        invocation_mode: 'run',
+        auth_subject: 'user-123',
+        tenant_id: null,
+        status: 'running',
+        current_run_id: 'run-1',
+        current_root_run_id: 'run-1',
+        last_completed_root_run_id: null,
+        transcript_version: 0,
+        transcript_summary: null,
+        metadata: null,
+        created_at: '2026-04-08T10:00:00.000Z',
+        updated_at: '2026-04-08T10:00:01.000Z',
+      },
+    ];
+    const client: PostgresClient = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === POSTGRES_SESSION_QUERIES.get) {
+          return { rows: [rows[0]], rowCount: 1 } as PostgresQueryResult<Record<string, unknown>>;
+        }
+        return { rows: [rows[1]], rowCount: 1 } as PostgresQueryResult<Record<string, unknown>>;
+      }) as PostgresClient['query'],
+    };
+    const store = new PostgresSessionStore(client);
+
+    const result = await store.tryStartRun(
+      'session-1',
+      {
+        agentId: 'support-agent',
+        invocationMode: 'run',
+        status: 'running',
+        currentRunId: 'run-1',
+        currentRootRunId: 'run-1',
+        updatedAt: '2026-04-08T10:00:01.000Z',
+      },
+      ['idle'],
+    );
+
+    expect(result).toMatchObject({ acquired: true, session: { status: 'running', currentRunId: 'run-1' } });
+    expect(client.query).toHaveBeenCalledWith(
+      POSTGRES_SESSION_QUERIES.tryStartRun,
+      expect.arrayContaining(['session-1', 'webchat', 'support-agent', 'run']),
+    );
+  });
+
   it('issues a DELETE with the session id', async () => {
     const client = createMockClient();
     const store = new PostgresSessionStore(client);
@@ -342,6 +411,24 @@ describe('PostgresSessionRunLinkStore', () => {
     expect(result?.metadata).toBeUndefined();
   });
 
+  it('lists links by root run id', async () => {
+    const client = createMockClientWithRows([{
+      run_id: 'run-1',
+      session_id: 'session-1',
+      root_run_id: 'root-1',
+      invocation_kind: 'run',
+      turn_index: null,
+      metadata: null,
+      created_at: '2026-04-08T10:00:00.000Z',
+    }]);
+    const store = new PostgresSessionRunLinkStore(client);
+
+    const result = await store.listByRootRunId('root-1');
+
+    expect(result.map((link) => link.runId)).toEqual(['run-1']);
+    expect(client.query).toHaveBeenCalledWith(POSTGRES_SESSION_RUN_LINK_QUERIES.listByRootRunId, ['root-1']);
+  });
+
   it('issues a DELETE for a session', async () => {
     const client = createMockClient();
     const store = new PostgresSessionRunLinkStore(client);
@@ -352,13 +439,85 @@ describe('PostgresSessionRunLinkStore', () => {
   });
 });
 
+describe('PostgresRunAdmissionStore', () => {
+  it('inserts an active admission when limits allow it', async () => {
+    const client = createMockClientWithRows([{
+      id: 'admission-1',
+      agent_id: 'support-agent',
+      tenant_id: 'acme',
+      session_id: 'session-1',
+      root_run_id: null,
+      status: 'running',
+      lease_owner: 'gateway',
+      lease_expires_at: '2026-04-08T10:10:00.000Z',
+      metadata: null,
+      created_at: '2026-04-08T10:00:00.000Z',
+      updated_at: '2026-04-08T10:00:00.000Z',
+    }]);
+    const store = new PostgresRunAdmissionStore(client);
+
+    const result = await store.tryAcquire(
+      {
+        id: 'admission-1',
+        agentId: 'support-agent',
+        tenantId: 'acme',
+        sessionId: 'session-1',
+        status: 'running',
+        leaseOwner: 'gateway',
+        leaseExpiresAt: '2026-04-08T10:10:00.000Z',
+        createdAt: '2026-04-08T10:00:00.000Z',
+        updatedAt: '2026-04-08T10:00:00.000Z',
+      },
+      { maxActiveRuns: 16, maxActiveRunsPerTenant: 8, maxActiveRunsPerAgent: 8 },
+      '2026-04-08T10:00:00.000Z',
+    );
+
+    expect(result).toMatchObject({ acquired: true, admission: { id: 'admission-1', agentId: 'support-agent' } });
+    expect(client.query).toHaveBeenCalledWith(
+      POSTGRES_RUN_ADMISSION_QUERIES.createIfUnderLimits,
+      expect.arrayContaining(['admission-1', 'support-agent', 'acme', 'session-1']),
+    );
+  });
+
+  it('returns the exhausted limit when admission insert is skipped', async () => {
+    const client = createMockClient();
+    client.query = vi.fn(async (sql: string) => {
+      if (sql === POSTGRES_RUN_ADMISSION_QUERIES.activeCounts) {
+        return {
+          rows: [{ total_count: 16, tenant_count: 1, agent_count: 1 }],
+          rowCount: 1,
+        } as PostgresQueryResult<Record<string, unknown>>;
+      }
+      return { rows: [], rowCount: 0 } as PostgresQueryResult<Record<string, unknown>>;
+    }) as PostgresClient['query'];
+    const store = new PostgresRunAdmissionStore(client);
+
+    const result = await store.tryAcquire(
+      {
+        id: 'admission-1',
+        agentId: 'support-agent',
+        status: 'running',
+        leaseOwner: 'gateway',
+        leaseExpiresAt: '2026-04-08T10:10:00.000Z',
+        createdAt: '2026-04-08T10:00:00.000Z',
+        updatedAt: '2026-04-08T10:00:00.000Z',
+      },
+      { maxActiveRuns: 16, maxActiveRunsPerTenant: 8, maxActiveRunsPerAgent: 8 },
+      '2026-04-08T10:00:00.000Z',
+    );
+
+    expect(result).toEqual({ acquired: false, limit: 'maxActiveRuns', activeCount: 16 });
+  });
+});
+
 describe('createPostgresSessionStores', () => {
-  it('creates all three store instances from a single client', () => {
+  it('creates all gateway session store instances from a single client', () => {
     const client = createMockClient();
     const stores = createPostgresSessionStores({ client });
 
     expect(stores.sessions).toBeInstanceOf(PostgresSessionStore);
     expect(stores.transcriptMessages).toBeInstanceOf(PostgresTranscriptMessageStore);
     expect(stores.sessionRunLinks).toBeInstanceOf(PostgresSessionRunLinkStore);
+    expect(stores.runAdmissions).toBeInstanceOf(PostgresRunAdmissionStore);
   });
 });

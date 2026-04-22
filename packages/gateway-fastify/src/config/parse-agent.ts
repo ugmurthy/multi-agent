@@ -27,6 +27,7 @@ export function validateAgentConfig(value: unknown, sourcePath: string): AgentCo
     issues,
   );
   const model = parseModelConfig(root?.model, 'model', issues);
+  const workspaceRoot = expectOptionalNonEmptyString(root?.workspaceRoot, 'workspaceRoot', issues);
   const systemInstructions = expectOptionalNonEmptyString(root?.systemInstructions, 'systemInstructions', issues);
   const tools = expectStringArray(root?.tools, 'tools', issues) ?? [];
   const delegates = expectStringArray(root?.delegates, 'delegates', issues) ?? [];
@@ -44,6 +45,7 @@ export function validateAgentConfig(value: unknown, sourcePath: string): AgentCo
     invocationModes,
     defaultInvocationMode,
     model,
+    workspaceRoot,
     systemInstructions,
     tools,
     delegates,

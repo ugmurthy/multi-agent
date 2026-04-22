@@ -9,6 +9,7 @@ import { mintLocalDevJwt } from './local-dev-jwt.js';
 import {
   type ClientOptions,
   type Deferred,
+  createAutoApprovalResolveFrame,
   createDeferred,
   normalizeConnectHost,
   parseCsv,
@@ -64,6 +65,8 @@ const HELP_TEXT = `Commands:
   /exit                      close the socket and exit`;
 
 const USAGE = `Usage:
+  adaptive-agent-tui [options]
+  gateway-tui [options]
   bun run ./packages/gateway-fastify/src/local-ws-client-tui.ts [options]
 
 Options:
@@ -80,14 +83,16 @@ Options:
   --token <jwt>              Use this JWT instead of auto-minting one
   --message <text>           Send one chat message after opening the session, then exit
   --run <goal>               Send one session-bound run.start after opening the session, then exit
+  --root-run <rootRunId>     Reattach the run session for a root run and replay its latest state
+  --auto-approve             Automatically approve tool approval requests in this TUI session
   --verbose                  Print every received frame as JSON
   --help                     Show this help text
 
 Examples:
-  bun run gateway:ws-client-tui
-  bun run gateway:ws-client-tui --message "Hello there"
-  bun run gateway:ws-client-tui --run "Summarize the repository"
-  bun run gateway:ws-client-tui --sub alice --tenant acme --role admin`;
+  adaptive-agent-tui
+  adaptive-agent-tui --message "Hello there"
+  adaptive-agent-tui --run "Summarize the repository"
+  adaptive-agent-tui --sub alice --tenant acme --role admin`;
 
 function recordLiveAgentEvent(state: TuiClientState, frame: AgentEventFrame): void {
   const payload = asRecord(frame.data);
@@ -145,7 +150,9 @@ async function parseArgs(args: string[]): Promise<ClientOptions> {
     token: undefined,
     message: undefined,
     runGoal: undefined,
+    rootRunId: undefined,
     verbose: false,
+    autoApprove: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -205,16 +212,23 @@ async function parseArgs(args: string[]): Promise<ClientOptions> {
         options.runGoal = requireValue(arg, args[index + 1]);
         index += 1;
         break;
+      case '--root-run':
+        options.rootRunId = requireValue(arg, args[index + 1]);
+        index += 1;
+        break;
       case '--verbose':
         options.verbose = true;
+        break;
+      case '--auto-approve':
+        options.autoApprove = true;
         break;
       default:
         throw new Error(`Unknown argument: ${arg}\n\n${USAGE}`);
     }
   }
 
-  if (options.message && options.runGoal) {
-    throw new Error('Use only one of --message or --run.');
+  if ([options.message, options.runGoal, options.rootRunId].filter(Boolean).length > 1) {
+    throw new Error('Use only one of --message, --run, or --root-run.');
   }
 
   options.roles = [...new Set(options.roles)];
@@ -488,15 +502,35 @@ async function runTuiMode(
         break;
 
       case 'approval.requested':
-        state.pendingApprovalRunId = frame.runId;
-        if (frame.sessionId) {
-          state.approvalSessionIds.set(frame.runId, frame.sessionId);
-        }
         messageLog.addMessage({
           type: 'system',
           content: `approval requested for run ${frame.runId}${frame.toolName ? ` (${frame.toolName})` : ''}${frame.reason ? `\nreason: ${frame.reason}` : ''}`,
           timestamp: new Date(),
         });
+        if (options.autoApprove) {
+          const approvalFrame = createAutoApprovalResolveFrame(state, frame);
+          if (approvalFrame) {
+            sendFrame(approvalFrame);
+            messageLog.addMessage({
+              type: 'system',
+              content: `auto-approved run ${frame.runId}`,
+              timestamp: new Date(),
+            });
+          } else {
+            messageLog.addMessage({
+              type: 'system',
+              content: 'Unable to auto-approve: no sessionId is tracked for this approval.',
+              timestamp: new Date(),
+            });
+          }
+          statusBar.invalidate();
+          tui.requestRender();
+          break;
+        }
+        state.pendingApprovalRunId = frame.runId;
+        if (frame.sessionId) {
+          state.approvalSessionIds.set(frame.runId, frame.sessionId);
+        }
         statusBar.invalidate();
         tui.requestRender();
         enqueueModal({
@@ -579,7 +613,7 @@ async function runTuiMode(
     tui.requestRender();
   };
 
-  async function openAdditionalSession(sessionId?: string): Promise<SessionOpenedFrame> {
+  async function openAdditionalSession(sessionId?: string, rootRunId?: string): Promise<SessionOpenedFrame> {
     await socketReady.promise;
     if (pendingSessionOpen) {
       throw new Error('A session.open request is already in flight.');
@@ -589,6 +623,7 @@ async function runTuiMode(
       type: 'session.open',
       channelId: options.channel,
       ...(sessionId ? { sessionId } : {}),
+      ...(rootRunId ? { rootRunId } : {}),
     });
     try {
       return await pendingSessionOpen.promise;
@@ -638,6 +673,17 @@ async function runTuiMode(
   if (options.sessionId) {
     const attachedSession = await openAdditionalSession(options.sessionId);
     recordInteractiveSession(state, getInteractiveSessionMode(attachedSession), attachedSession.sessionId);
+  }
+
+  if (options.rootRunId) {
+    state.lastFailedRunId = options.rootRunId;
+    messageLog.addMessage({
+      type: 'system',
+      content: `Root run selected: ${options.rootRunId}`,
+      timestamp: new Date(),
+    });
+    statusBar.invalidate();
+    tui.requestRender();
   }
 
   editor.onSubmit = async (value: string) => {
@@ -722,12 +768,12 @@ async function runTuiMode(
       try {
         const runId = parseRetryCommand(trimmed, state.lastFailedRunId);
         const retrySessionId = state.failedRunSessionIds.get(runId) ?? state.runSessionId;
-        if (!retrySessionId) {
+        if (!retrySessionId && runId !== options.rootRunId) {
           throw new Error(`No run sessionId is tracked for run "${runId}". Reattach the run session or pass a runId from this client session.`);
         }
         sendFrame({
           type: 'run.retry',
-          sessionId: retrySessionId,
+          ...(retrySessionId ? { sessionId: retrySessionId } : {}),
           runId,
         });
         statusBar.invalidate();

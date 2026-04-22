@@ -7,26 +7,31 @@ import { dirname, join } from 'node:path';
 import type { AgentConfig, GatewayConfig, LoadedConfig } from './config.js';
 import { startGateway } from './bootstrap.js';
 import { loadAgentConfigs, resolveGatewayRequestLogLevel } from './config.js';
+import { BUILTIN_LOCAL_TOOL_NAMES } from './core.js';
 import {
   AGENT_CONFIG_DIR,
   DEFAULT_AGENT_CONFIG_PATH,
+  ADAPTIVE_AGENT_ARTIFACTS_DIR,
   DEFAULT_GATEWAY_JWT_SECRET,
   GATEWAY_CONFIG_PATH,
   GATEWAY_STORE_BASE_DIR,
+  LOG_AGENT_CONFIG_PATH,
 } from './local-dev.js';
 import { createLocalModuleRegistry } from './local-modules.js';
 
 async function main(): Promise<void> {
   await mkdir(GATEWAY_STORE_BASE_DIR, { recursive: true });
+  await mkdir(ADAPTIVE_AGENT_ARTIFACTS_DIR, { recursive: true });
   await mkdir(AGENT_CONFIG_DIR, { recursive: true });
   const logDir = join(GATEWAY_STORE_BASE_DIR, 'logs');
 
   const gatewayJwtSecret = process.env.GATEWAY_JWT_SECRET ?? DEFAULT_GATEWAY_JWT_SECRET;
   const gatewayConfigStatus = await ensureGatewayConfig(GATEWAY_CONFIG_PATH, gatewayJwtSecret);
   const defaultAgentStatus = await ensureDefaultAgentConfig(DEFAULT_AGENT_CONFIG_PATH);
+  const logAgentStatus = await ensureLogAgentConfig(LOG_AGENT_CONFIG_PATH, DEFAULT_AGENT_CONFIG_PATH);
   const loadedAgentConfigs = await loadAgentConfigs({ dir: AGENT_CONFIG_DIR });
   const moduleRegistry = await createLocalModuleRegistry({
-    workspaceRoot: process.cwd(),
+    workspaceRoot: ADAPTIVE_AGENT_ARTIFACTS_DIR,
     requiredDelegateNames: collectDelegateNames(loadedAgentConfigs),
   });
 
@@ -46,7 +51,9 @@ async function main(): Promise<void> {
   console.log(`- Agent config dir: ${AGENT_CONFIG_DIR}`);
   console.log(`- Configured default agent: ${formatConfiguredDefaultAgent(gateway.gatewayConfig, gateway.agentConfigs)}`);
   console.log(`- Conventional default-agent config: ${DEFAULT_AGENT_CONFIG_PATH} (${defaultAgentStatus})`);
+  console.log(`- Conventional log-agent config: ${LOG_AGENT_CONFIG_PATH} (${logAgentStatus})`);
   console.log(`- Gateway stores: ${formatStoreMode(gateway.gatewayConfig)}`);
+  console.log(`- File tool root: ${ADAPTIVE_AGENT_ARTIFACTS_DIR}`);
   console.log(`- Logs: ${logDir}`);
   console.log(`- Request logs: ${formatRequestLogDestination(gateway.gatewayConfig, logDir)}`);
   console.log(`- Runtime logs: ${formatRuntimeLogDestination(gateway.gatewayConfig, logDir)}`);
@@ -80,12 +87,43 @@ async function ensureDefaultAgentConfig(path: string): Promise<'created' | 'exis
     return 'existing';
   }
 
-  const meshApiKey = process.env.MESH_API_KEY;
-  if (!meshApiKey) {
-    throw new Error(`MESH_API_KEY is required to create ${path}.`);
+  await writeJsonFile(path, createDefaultAgentConfig());
+  return 'created';
+}
+
+async function ensureLogAgentConfig(path: string, defaultAgentPath: string): Promise<'created' | 'existing'> {
+  if (existsSync(path)) {
+    return 'existing';
   }
 
-  const defaultAgentConfig: AgentConfig = {
+  const defaultAgentConfig = validateLocalAgentTemplate(await readJsonFile(defaultAgentPath), defaultAgentPath);
+  const logAgentConfig: AgentConfig = {
+    ...defaultAgentConfig,
+    id: 'log-agent',
+    name: 'Log Agent',
+    workspaceRoot: '$HOME/.adaptiveAgent',
+    tools: [...BUILTIN_LOCAL_TOOL_NAMES],
+  };
+
+  await writeJsonFile(path, logAgentConfig);
+  return 'created';
+}
+
+function validateLocalAgentTemplate(value: unknown, path: string): AgentConfig {
+  if (!isRecord(value)) {
+    throw new Error(`Expected ${path} to contain an agent config object.`);
+  }
+
+  return value as unknown as AgentConfig;
+}
+
+function createDefaultAgentConfig(): AgentConfig {
+  const meshApiKey = process.env.MESH_API_KEY;
+  if (!meshApiKey) {
+    throw new Error('MESH_API_KEY is required to create local agent configs.');
+  }
+
+  return {
     id: 'default-agent',
     name: 'Default Agent',
     invocationModes: ['chat', 'run'],
@@ -99,9 +137,6 @@ async function ensureDefaultAgentConfig(path: string): Promise<'created' | 'exis
     tools: [],
     delegates: [],
   };
-
-  await writeJsonFile(path, defaultAgentConfig);
-  return 'created';
 }
 
 async function ensureGatewayConfig(path: string, gatewayJwtSecret: string): Promise<'created' | 'existing' | 'updated'> {

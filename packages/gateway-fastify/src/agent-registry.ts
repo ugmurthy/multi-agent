@@ -1,8 +1,14 @@
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
+
 import {
+  BUILTIN_LOCAL_TOOL_NAMES,
   createAdaptiveAgent,
+  createBuiltinTools,
   type AdaptiveAgentLogger,
   type CreateAdaptiveAgentOptions,
   type CreatedAdaptiveAgent,
+  type ToolDefinition,
 } from './core.js';
 
 import type { AgentConfig, InvocationMode, LoadedConfig } from './config.js';
@@ -138,13 +144,70 @@ export function createAgentRegistry(options: CreateAgentRegistryOptions): AgentR
   return new AgentRegistry(options);
 }
 
-const defaultAgentFactory: AgentFactory = (entry) =>
+const builtinLocalToolNames = new Set<string>(BUILTIN_LOCAL_TOOL_NAMES);
+
+const defaultAgentFactory: AgentFactory = async (entry) =>
   createAdaptiveAgent({
     model: entry.definition.config.model,
-    tools: entry.modules.tools,
+    tools: await resolveAgentTools(entry),
     delegates: entry.modules.delegates.length > 0 ? entry.modules.delegates : undefined,
     defaults: entry.definition.config.defaults,
     systemInstructions: entry.definition.config.systemInstructions,
     logger: entry.logger,
     runtime: entry.runtime,
   });
+
+async function resolveAgentTools(entry: AgentRegistryEntry): Promise<ToolDefinition[]> {
+  const workspaceRoot = entry.definition.config.workspaceRoot;
+  if (!workspaceRoot) {
+    return entry.modules.tools;
+  }
+
+  const workspaceTools = await createBuiltinTools({
+    rootDir: resolveWorkspaceRoot(workspaceRoot),
+    webSearchProvider: readWebSearchProvider(process.env.WEB_SEARCH_PROVIDER),
+    braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY,
+    webToolTimeoutMs: parseOptionalPositiveInteger(process.env.WEB_TOOL_TIMEOUT_MS),
+  });
+  const workspaceToolByName = new Map(workspaceTools.map((tool) => [tool.name, tool]));
+
+  return entry.modules.tools.map((tool) => {
+    if (!builtinLocalToolNames.has(tool.name)) {
+      return tool;
+    }
+
+    return workspaceToolByName.get(tool.name) ?? tool;
+  });
+}
+
+function resolveWorkspaceRoot(value: string): string {
+  return resolveWorkspaceRootForAgentConfig(value);
+}
+
+export function resolveWorkspaceRootForAgentConfig(value: string): string {
+  return resolve(expandEnvironmentVariables(value));
+}
+
+function expandEnvironmentVariables(value: string): string {
+  return value.replace(/\$(\w+)|\$\{([^}]+)\}/g, (match, bareName: string | undefined, bracedName: string | undefined) => {
+    const variableName = bareName ?? bracedName;
+    if (variableName === 'HOME') {
+      return process.env.HOME ?? homedir();
+    }
+
+    return variableName ? (process.env[variableName] ?? match) : match;
+  });
+}
+
+function readWebSearchProvider(value: string | undefined): 'brave' | 'duckduckgo' {
+  return value === 'brave' ? 'brave' : 'duckduckgo';
+}
+
+function parseOptionalPositiveInteger(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}

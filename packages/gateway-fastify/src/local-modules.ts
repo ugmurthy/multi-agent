@@ -1,10 +1,9 @@
 import { access, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { createJwtAuthProvider } from './auth.js';
 import { createBuiltinTools, loadSkillDelegateFromDirectory, type DelegateDefinition } from './core.js';
-import { ADAPTIVE_AGENT_HOME } from './local-dev.js';
+import { ADAPTIVE_AGENT_ARTIFACTS_DIR, GATEWAY_SKILLS_DIR } from './local-dev.js';
 import { createModuleRegistry, type ModuleRegistry } from './registries.js';
 
 export interface CreateLocalModuleRegistryOptions {
@@ -16,7 +15,7 @@ export interface CreateLocalModuleRegistryOptions {
 export async function createLocalModuleRegistry(
   options: CreateLocalModuleRegistryOptions = {},
 ): Promise<ModuleRegistry> {
-  const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
+  const workspaceRoot = resolve(options.workspaceRoot ?? ADAPTIVE_AGENT_ARTIFACTS_DIR);
   const tools = await createBuiltinTools({
     rootDir: workspaceRoot,
     webSearchProvider: readWebSearchProvider(process.env.WEB_SEARCH_PROVIDER),
@@ -76,7 +75,7 @@ async function loadLocalSkillDelegates(options: {
 }
 
 function defaultSkillDirectories(): string[] {
-  return [join(ADAPTIVE_AGENT_HOME, 'skills'), fileURLToPath(new URL('../../../examples/skills', import.meta.url))];
+  return [GATEWAY_SKILLS_DIR];
 }
 
 async function pathExists(path: string): Promise<boolean> {

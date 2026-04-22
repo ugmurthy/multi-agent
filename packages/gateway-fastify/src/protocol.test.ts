@@ -47,6 +47,22 @@ describe('gateway protocol validation', () => {
     });
   });
 
+  it('parses sessionless run.retry frames for root-run retry', () => {
+    const frame = parseInboundFrame(
+      JSON.stringify({
+        type: 'run.retry',
+        runId: 'root-1',
+      }),
+    );
+
+    expect(frame).toEqual({
+      type: 'run.retry',
+      sessionId: undefined,
+      runId: 'root-1',
+      metadata: undefined,
+    });
+  });
+
   it('maps invalid JSON to a stable protocol error', () => {
     expect(() => parseInboundFrame('{"type":"ping"')).toThrowError(ProtocolValidationError);
 

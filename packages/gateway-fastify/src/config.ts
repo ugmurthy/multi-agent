@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 
 import { ConfigValidationError } from './errors.js';
 import { validateAgentConfig } from './config/parse-agent.js';
-import { resolveGatewayRequestLogLevel, validateGatewayConfig } from './config/parse-gateway.js';
+import { resolveGatewayConcurrencyConfig, resolveGatewayRequestLogLevel, validateGatewayConfig } from './config/parse-gateway.js';
 import {
   DEFAULT_AGENT_CONFIG_DIR,
   DEFAULT_GATEWAY_CONFIG_PATH,
@@ -16,6 +16,7 @@ import {
   type GatewayBindingMatch,
   type GatewayChannelConfig,
   type GatewayChannelDefaults,
+  type GatewayConcurrencyConfig,
   type GatewayConfig,
   type GatewayCronConfig,
   type GatewayCronFileSyncConfig,
@@ -39,6 +40,7 @@ export {
   DEFAULT_GATEWAY_CONFIG_PATH,
   GATEWAY_HOOK_SLOTS,
   resolveGatewayRequestLogLevel,
+  resolveGatewayConcurrencyConfig,
 };
 export type {
   AgentConfig,
@@ -49,6 +51,7 @@ export type {
   GatewayBindingMatch,
   GatewayChannelConfig,
   GatewayChannelDefaults,
+  GatewayConcurrencyConfig,
   GatewayConfig,
   GatewayCronConfig,
   GatewayCronFileSyncConfig,

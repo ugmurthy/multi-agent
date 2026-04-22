@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import { loadSkillFromDirectory, loadSkillFromFile, parseSkillMarkdown, SkillLoadError } from './load-skill.js';
 import { skillToDelegate, skillsToDelegate } from './skill-to-delegate.js';
@@ -11,6 +12,16 @@ import type { ToolDefinition } from '../types.js';
 // ── parseSkillMarkdown ──────────────────────────────────────────────────────
 
 describe('parseSkillMarkdown', () => {
+  const originalMeshApiKey = process.env.MESH_API_KEY;
+
+  afterEach(() => {
+    if (originalMeshApiKey === undefined) {
+      delete process.env.MESH_API_KEY;
+    } else {
+      process.env.MESH_API_KEY = originalMeshApiKey;
+    }
+  });
+
   it('parses a standard SKILL.md with name, description, and body', () => {
     const md = `---
 name: researcher
@@ -89,6 +100,76 @@ Work with local files.
     });
 
     expect(skill.allowedTools).toEqual(['read_file', 'write_file']);
+  });
+
+  it('parses model overrides from dotted frontmatter', () => {
+    process.env.MESH_API_KEY = 'mesh-test-key';
+    const md = `---
+name: log-analyser
+description: Analyze gateway and runtime logs
+model.provider: mesh
+model.model: google/gemma-4-26b-a4b-it
+model.apiKeyEnv: MESH_API_KEY
+allowedTools:
+  - read_file
+  - list_directory
+---
+
+Analyze logs carefully.
+`;
+
+    const skill = parseSkillMarkdown(md, 'test');
+
+    expect(skill.model?.provider).toBe('mesh');
+    expect(skill.model?.model).toBe('google/gemma-4-26b-a4b-it');
+  });
+
+  it('requires apiKeyEnv to resolve when a provider needs an API key', () => {
+    delete process.env.MESH_API_KEY;
+    const md = `---
+name: log-analyser
+description: Analyze gateway and runtime logs
+model.provider: mesh
+model.model: google/gemma-4-26b-a4b-it
+model.apiKeyEnv: MESH_API_KEY
+---
+
+Analyze logs carefully.
+`;
+
+    expect(() => parseSkillMarkdown(md, 'test')).toThrow(
+      "requires environment variable 'MESH_API_KEY' for model.apiKeyEnv",
+    );
+  });
+
+  it('rejects inline model API keys in skill frontmatter', () => {
+    const md = `---
+name: log-analyser
+description: Analyze gateway and runtime logs
+model.provider: mesh
+model.model: google/gemma-4-26b-a4b-it
+model.apiKey: inline-secret
+---
+
+Analyze logs carefully.
+`;
+
+    expect(() => parseSkillMarkdown(md, 'test')).toThrow(
+      "must use 'model.apiKeyEnv' instead of inline 'model.apiKey'",
+    );
+  });
+
+  it('loads the bundled log-analyser skill as a Mesh-backed delegate profile', async () => {
+    process.env.MESH_API_KEY = 'mesh-test-key';
+    const skillDir = fileURLToPath(new URL('../../../../examples/skills/log-analyser', import.meta.url));
+
+    const skill = await loadSkillFromDirectory(skillDir);
+    const delegate = skillToDelegate(skill);
+
+    expect(delegate.name).toBe('log-analyser');
+    expect(delegate.allowedTools).toEqual(['list_directory', 'read_file', 'write_file']);
+    expect(delegate.model?.provider).toBe('mesh');
+    expect(delegate.model?.model).toBe('google/gemma-4-26b-a4b-it');
   });
 
   it('handles quoted description values', () => {

@@ -4,10 +4,13 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export const ADAPTIVE_AGENT_HOME = join(homedir(), '.adaptiveAgent');
+export const ADAPTIVE_AGENT_ARTIFACTS_DIR = join(ADAPTIVE_AGENT_HOME, 'artifacts');
 export const GATEWAY_STORE_BASE_DIR = join(ADAPTIVE_AGENT_HOME, 'data', 'gateway');
+export const GATEWAY_SKILLS_DIR = join(ADAPTIVE_AGENT_HOME, 'gateway', 'skills');
 export const GATEWAY_CONFIG_PATH = join(ADAPTIVE_AGENT_HOME, 'config', 'gateway.json');
 export const AGENT_CONFIG_DIR = join(ADAPTIVE_AGENT_HOME, 'agents');
 export const DEFAULT_AGENT_CONFIG_PATH = join(AGENT_CONFIG_DIR, 'default-agent.json');
+export const LOG_AGENT_CONFIG_PATH = join(AGENT_CONFIG_DIR, 'log-agent.json');
 export const DEFAULT_GATEWAY_JWT_SECRET = 'adaptive-agent-local-dev-secret';
 
 export interface LocalGatewayConnectionConfig {

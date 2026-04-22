@@ -92,6 +92,44 @@ create table if not exists gateway_cron_runs (
 
 create index if not exists gateway_cron_runs_job_idx
   on gateway_cron_runs (job_id, fire_time asc, id asc);
+
+create table if not exists gateway_run_admissions (
+  id text primary key,
+  agent_id text not null,
+  tenant_id text,
+  session_id text,
+  root_run_id text,
+  status text not null default 'running',
+  lease_owner text not null,
+  lease_expires_at timestamptz not null,
+  metadata jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists gateway_run_admissions_active_idx
+  on gateway_run_admissions (status, lease_expires_at asc, agent_id, tenant_id);
+`,
+  },
+  {
+    name: 'gateway-fastify:002_run_admissions',
+    sql: `
+create table if not exists gateway_run_admissions (
+  id text primary key,
+  agent_id text not null,
+  tenant_id text,
+  session_id text,
+  root_run_id text,
+  status text not null default 'running',
+  lease_owner text not null,
+  lease_expires_at timestamptz not null,
+  metadata jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists gateway_run_admissions_active_idx
+  on gateway_run_admissions (status, lease_expires_at asc, agent_id, tenant_id);
 `,
   },
 ];

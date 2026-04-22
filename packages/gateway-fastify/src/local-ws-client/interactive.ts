@@ -49,6 +49,16 @@ export function recordFailedRunFromAgentEvent(
   }
 }
 
+export function recordRootRunRetryTarget(
+  state: InteractiveSessionState & FailedRunTrackingState,
+  rootRunId: string,
+  sessionId: string,
+): void {
+  recordInteractiveSession(state, 'run', sessionId);
+  state.lastFailedRunId = rootRunId;
+  state.failedRunSessionIds.set(rootRunId, sessionId);
+}
+
 export function getInteractiveSessionMode(frame: Pick<SessionOpenedFrame, 'invocationMode'>): 'chat' | 'run' {
   return frame.invocationMode === 'run' ? 'run' : 'chat';
 }

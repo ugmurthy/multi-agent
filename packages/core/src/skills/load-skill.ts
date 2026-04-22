@@ -1,6 +1,7 @@
 import { readFile, access } from 'node:fs/promises';
 import { join, basename, resolve } from 'node:path';
 
+import { createModelAdapter, type ModelAdapterConfig } from '../adapters/create-model-adapter.js';
 import type { AgentDefaults, ToolDefinition, JsonValue } from '../types.js';
 import type { SkillDefinition } from './types.js';
 
@@ -16,8 +17,9 @@ export interface LoadSkillOptions {
  * Markdown body as the skill instructions.
  *
  * Required frontmatter fields: `name`, `description`.
- * Optional frontmatter fields: `triggers`, `allowedTools`, `handler`, and
- * dotted `defaults.*` keys such as `defaults.toolTimeoutMs: 120000`.
+ * Optional frontmatter fields: `triggers`, `allowedTools`, `handler`, dotted
+ * `model.*` keys such as `model.provider: mesh`, and dotted `defaults.*`
+ * keys such as `defaults.toolTimeoutMs: 120000`.
  *
  * `allowedTools` can be specified in frontmatter or passed via `options`.
  * The `options` value takes precedence.
@@ -75,6 +77,7 @@ export function parseSkillMarkdown(
 
   const triggers = parseStringArray(meta.triggers);
   const allowedTools = options?.allowedTools ?? parseStringArray(meta.allowedTools) ?? [];
+  const model = parseSkillModel(meta, source);
   const defaults = parseSkillDefaults(meta, source);
 
   const instructions = body.trim();
@@ -90,6 +93,7 @@ export function parseSkillMarkdown(
     instructions,
     allowedTools,
     triggers: triggers && triggers.length > 0 ? triggers : undefined,
+    model,
     defaults,
     handler,
   };
@@ -211,6 +215,100 @@ function parseStringArray(value: unknown): string[] | undefined {
   }
 
   return undefined;
+}
+
+function parseSkillModel(
+  meta: Record<string, string | string[]>,
+  source: string,
+): SkillDefinition['model'] | undefined {
+  const provider = parseOptionalModelProvider(meta, 'model.provider', source);
+  const modelName = parseOptionalNonEmptyString(meta, 'model.model', source);
+  assertNoInlineModelApiKey(meta, source);
+  const apiKeyEnv = parseOptionalNonEmptyString(meta, 'model.apiKeyEnv', source);
+  const baseUrl = parseOptionalNonEmptyString(meta, 'model.baseUrl', source);
+  const siteUrl = parseOptionalNonEmptyString(meta, 'model.siteUrl', source);
+  const siteName = parseOptionalNonEmptyString(meta, 'model.siteName', source);
+
+  if (
+    provider === undefined &&
+    modelName === undefined &&
+    apiKeyEnv === undefined &&
+    baseUrl === undefined &&
+    siteUrl === undefined &&
+    siteName === undefined
+  ) {
+    return undefined;
+  }
+
+  if (!provider) {
+    throw new SkillLoadError(`SKILL.md at ${source} with model override is missing 'model.provider'`);
+  }
+
+  if (!modelName) {
+    throw new SkillLoadError(`SKILL.md at ${source} with model override is missing 'model.model'`);
+  }
+
+  const resolvedApiKey = apiKeyEnv ? process.env[apiKeyEnv] : undefined;
+  if (apiKeyEnv && !resolvedApiKey) {
+    throw new SkillLoadError(`SKILL.md at ${source} requires environment variable '${apiKeyEnv}' for model.apiKeyEnv`);
+  }
+
+  const config: ModelAdapterConfig = {
+    provider,
+    model: modelName,
+    apiKey: resolvedApiKey,
+    baseUrl,
+    siteUrl,
+    siteName,
+  };
+
+  try {
+    return createModelAdapter(config);
+  } catch (error) {
+    throw new SkillLoadError(
+      `SKILL.md at ${source} has invalid model override: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function assertNoInlineModelApiKey(meta: Record<string, string | string[]>, source: string): void {
+  if (meta['model.apiKey'] !== undefined) {
+    throw new SkillLoadError(`SKILL.md at ${source} must use 'model.apiKeyEnv' instead of inline 'model.apiKey'`);
+  }
+}
+
+function parseOptionalModelProvider(
+  meta: Record<string, string | string[]>,
+  key: string,
+  source: string,
+): ModelAdapterConfig['provider'] | undefined {
+  const value = parseOptionalNonEmptyString(meta, key, source);
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === 'openrouter' || value === 'ollama' || value === 'mistral' || value === 'mesh') {
+    return value;
+  }
+
+  throw new SkillLoadError(`SKILL.md at ${source} has invalid model provider for '${key}'`);
+}
+
+function parseOptionalNonEmptyString(
+  meta: Record<string, string | string[]>,
+  key: string,
+  source: string,
+): string | undefined {
+  const value = meta[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new SkillLoadError(`SKILL.md at ${source} has invalid string for '${key}'`);
+  }
+
+  return value;
 }
 
 function parseSkillDefaults(

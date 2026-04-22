@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AgentRegistry } from './agent-registry.js';
+import { acquireRunAdmission, type AcquiredRunAdmission } from './admission.js';
 import type { GatewayAuthContext } from './auth.js';
-import type { GatewayConfig } from './config.js';
+import { resolveGatewayConcurrencyConfig, type GatewayConfig } from './config.js';
 import type { JsonObject, JsonValue } from './core.js';
 import { executeHookSlot } from './hooks.js';
 import type { ApprovalRequestedFrame, MessageOutputFrame, MessageSendFrame } from './protocol.js';
@@ -11,7 +12,7 @@ import type { RealtimeEventForwardingContext } from './realtime-events.js';
 import type { ResolvedGatewayHooks } from './registries.js';
 import { withForwardedRealtimeEvents } from './realtime-events.js';
 import { resolveGatewayRoute } from './routing.js';
-import { assertGatewaySessionWriteAllowed, getAuthorizedGatewaySession } from './session.js';
+import { assertGatewaySessionWriteAllowed, getAuthorizedGatewaySession, tryAcquireGatewaySessionRun } from './session.js';
 import type { GatewaySessionRecord, GatewayStores, TranscriptMessageRecord, TranscriptMessageRole } from './stores.js';
 import { buildTranscriptReplayEnvelope, buildTranscriptSummary, resolveGatewayTranscriptPolicy } from './transcript.js';
 
@@ -30,7 +31,8 @@ export async function executeGatewayChatTurn(
   frame: MessageSendFrame,
   options: ExecuteGatewayChatTurnOptions,
 ): Promise<MessageOutputFrame | ApprovalRequestedFrame> {
-  const nowIso = (options.now ?? (() => new Date()))().toISOString();
+  const now = (options.now ?? (() => new Date()))();
+  const nowIso = now.toISOString();
   const session = await getAuthorizedGatewaySession(frame.sessionId, {
     authContext: options.authContext,
     stores: options.stores,
@@ -68,17 +70,31 @@ export async function executeGatewayChatTurn(
   const transcriptPolicy = resolveGatewayTranscriptPolicy(options.gatewayConfig);
   const transcriptMessages = await options.stores.transcriptMessages.listBySession(session.id);
   const agent = await options.agentRegistry.getAgent(route.agentId);
-  const runningSession = await options.stores.sessions.update({
-    ...session,
+  const runningSession = await tryAcquireGatewaySessionRun(session, {
+    stores: options.stores,
+    requestType: frame.type,
+    expectedAllowedStatuses: ['idle', 'failed'],
+    patch: {
     agentId: route.agentId,
     invocationMode: 'chat',
     status: 'running',
     currentRunId: undefined,
     currentRootRunId: undefined,
     updatedAt: nowIso,
+    },
   });
+  let admission: AcquiredRunAdmission | undefined;
 
   try {
+    admission = await acquireRunAdmission({
+      stores: options.stores,
+      concurrency: resolveGatewayConcurrencyConfig(options.gatewayConfig.concurrency),
+      agentId: route.agentId,
+      tenantId: runningSession.tenantId,
+      sessionId: runningSession.id,
+      requestType: frame.type,
+      now,
+    });
     const replayEnvelope = buildTranscriptReplayEnvelope(runningSession, transcriptMessages, transcriptPolicy);
     const chatResult = await withForwardedRealtimeEvents(
       agent,
@@ -258,6 +274,14 @@ export async function executeGatewayChatTurn(
     }
   } catch (error) {
     if (error instanceof ProtocolValidationError) {
+      if (error.code === 'gateway_overloaded') {
+        await settleSession(options.stores, runningSession, {
+          status: session.status,
+          currentRunId: session.currentRunId,
+          currentRootRunId: session.currentRootRunId,
+          updatedAt: nowIso,
+        });
+      }
       throw error;
     }
 
@@ -276,6 +300,8 @@ export async function executeGatewayChatTurn(
         details: { sessionId: runningSession.id },
       },
     );
+  } finally {
+    await admission?.release();
   }
 }
 
