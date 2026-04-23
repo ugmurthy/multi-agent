@@ -106,6 +106,7 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
       hooks: gatewayModules.hooks,
       agentRegistry,
       stores,
+      traceClient: storeBundle.postgresClient,
       requestLogger,
       staleLeaseHeartbeatBefore: new Date(bootStartedAtMs),
     });

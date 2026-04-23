@@ -3,6 +3,7 @@ import type {
   OutboundFrame,
   RunOutputFrame,
   SessionOpenedFrame,
+  SessionUpdatedFrame,
 } from './protocol';
 
 import { isClarificationRequestOutput } from './format';
@@ -34,6 +35,7 @@ export class GatewayWebClient {
   private readonly approvalSessionIds = new Map<string, string>();
   private readonly clarificationSessionIds = new Map<string, string>();
   private readonly failedRunSessionIds = new Map<string, string>();
+  private pendingApprovalRunId?: string;
   private socket?: WebSocket;
   private sessionId?: string;
   private runSessionId?: string;
@@ -124,8 +126,8 @@ export class GatewayWebClient {
     });
   }
 
-  resolveApproval(runId: string, approved: boolean): void {
-    const sessionId = this.approvalSessionIds.get(runId);
+  resolveApproval(runId: string, approved: boolean, sessionIdHint?: string): void {
+    const sessionId = this.approvalSessionIds.get(runId) ?? sessionIdHint;
     if (!sessionId) {
       throw new Error(`No approval session is tracked for run "${runId}".`);
     }
@@ -137,6 +139,9 @@ export class GatewayWebClient {
       approved,
     });
     this.approvalSessionIds.delete(runId);
+    if (this.pendingApprovalRunId === runId) {
+      this.pendingApprovalRunId = undefined;
+    }
   }
 
   resolveClarification(runId: string, message: string): void {
@@ -193,6 +198,9 @@ export class GatewayWebClient {
       case 'session.opened':
         this.trackSession(frame);
         break;
+      case 'session.updated':
+        this.trackSessionUpdate(frame);
+        break;
       case 'approval.requested':
         this.trackApproval(frame);
         break;
@@ -229,8 +237,22 @@ export class GatewayWebClient {
   }
 
   private trackApproval(frame: ApprovalRequestedFrame): void {
+    this.pendingApprovalRunId = frame.runId;
     if (frame.sessionId) {
       this.approvalSessionIds.set(frame.runId, frame.sessionId);
+    }
+  }
+
+  private trackSessionUpdate(frame: SessionUpdatedFrame): void {
+    if (frame.status === 'awaiting_approval' && frame.activeRunId) {
+      this.pendingApprovalRunId = frame.activeRunId;
+      this.approvalSessionIds.set(frame.activeRunId, frame.sessionId);
+      return;
+    }
+
+    if (this.pendingApprovalRunId && frame.status !== 'awaiting_approval') {
+      this.approvalSessionIds.delete(this.pendingApprovalRunId);
+      this.pendingApprovalRunId = undefined;
     }
   }
 

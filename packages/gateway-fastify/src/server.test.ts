@@ -174,6 +174,137 @@ describe('createGatewayServer', () => {
     });
   });
 
+  it('returns persisted dashboard root runs with filters', async () => {
+    const querySpy = vi.fn(async <TRow extends Record<string, unknown>>(sql: string, params?: unknown[]) => {
+      expect(sql).toContain('from agent_runs root');
+      expect(sql).toContain('root.status = any($3::text[])');
+      expect(sql).toContain('link.session_id is not null');
+      expect(sql).toContain('root.status = \'awaiting_approval\'');
+      expect(params).toEqual([
+        '2026-04-01T00:00:00.000Z',
+        '2026-04-22T23:59:59.000Z',
+        ['failed', 'running'],
+        'session-1',
+        '%quota%',
+        26,
+        50,
+      ]);
+      return {
+        rows: [{
+          root_run_id: 'root-1',
+          session_id: 'session-1',
+          status: 'awaiting_approval',
+          goal_preview: 'Review quota limits',
+          agent_id: 'support-agent',
+          model_provider: 'openai',
+          model_name: 'gpt-5.4',
+          created_at: '2026-04-21T10:00:00.000Z',
+          updated_at: '2026-04-21T10:01:00.000Z',
+          completed_at: null,
+          duration_ms: null,
+          child_run_count: '2',
+          tool_call_count: '3',
+          total_prompt_tokens: '120',
+          total_completion_tokens: '45',
+          total_reasoning_tokens: '10',
+          estimated_cost_usd: '0.0123',
+          pending_approval: {
+            runId: 'child-approval',
+            rootRunId: 'root-1',
+            sessionId: 'session-1',
+          },
+        }],
+      } as unknown as { rows: TRow[]; rowCount: number };
+    });
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['admin']),
+      traceClient: { query: querySpy },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/runs?from=2026-04-01T00:00:00.000Z&to=2026-04-22T23:59:59.000Z&status=failed,running&session=linked&sessionId=session-1&q=quota&requiresApproval=true&limit=25&offset=50',
+      headers: { authorization: 'Bearer admin-token' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      items: [{
+        rootRunId: 'root-1',
+        sessionId: 'session-1',
+        status: 'awaiting_approval',
+        goalPreview: 'Review quota limits',
+        agentId: 'support-agent',
+        modelProvider: 'openai',
+        modelName: 'gpt-5.4',
+        createdAt: '2026-04-21T10:00:00.000Z',
+        updatedAt: '2026-04-21T10:01:00.000Z',
+        completedAt: null,
+        durationMs: null,
+        childRunCount: 2,
+        toolCallCount: 3,
+        totalPromptTokens: 120,
+        totalCompletionTokens: 45,
+        totalReasoningTokens: 10,
+        estimatedCostUSD: 0.0123,
+        pendingApproval: {
+          runId: 'child-approval',
+          rootRunId: 'root-1',
+          sessionId: 'session-1',
+        },
+      }],
+      limit: 25,
+      offset: 50,
+      nextOffset: null,
+    });
+  });
+
+  it('rejects dashboard routes without the admin role', async () => {
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['member']),
+      traceClient: {
+        query: async () => ({ rows: [], rowCount: 0 }),
+      },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/runs',
+      headers: { authorization: 'Bearer member-token' },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({
+      type: 'error',
+      code: 'session_forbidden',
+      message: 'Gateway dashboard routes require the admin role.',
+      requestType: 'upgrade',
+      details: { requiredRole: 'admin' },
+    });
+  });
+
+  it('reports dashboard trace routes as unavailable without a trace client', async () => {
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['admin']),
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/runs',
+      headers: { authorization: 'Bearer admin-token' },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({
+      type: 'error',
+      code: 'trace_store_unavailable',
+      message: 'Persisted run dashboard routes require PostgreSQL runtime stores.',
+    });
+  });
+
   it('logs HTTP requests when request logging is enabled', async () => {
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 

@@ -15,6 +15,7 @@ import { createInMemoryGatewayStores, type GatewayStores } from './stores.js';
 export interface ResolvedStoreBundle {
   gatewayStores: GatewayStores;
   runtimeStores?: PostgresRuntimeStoreBundle;
+  postgresClient?: PostgresClient | PostgresPoolClient;
   close?: () => Promise<void>;
 }
 
@@ -44,6 +45,7 @@ export async function resolveGatewayStoreBundle(
     return {
       gatewayStores,
       runtimeStores: createPostgresRuntimeStores({ client }),
+      postgresClient: client,
       close: ownedPool ? async () => ownedPool.end() : undefined,
     };
   }

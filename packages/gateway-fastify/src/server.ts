@@ -21,6 +21,13 @@ import { executeGatewayChatTurn } from './chat.js';
 import { resolveGatewayRequestLogLevel, type GatewayConfig } from './config.js';
 import type { JsonObject, JsonValue } from './core.js';
 import {
+  listDashboardRootRuns,
+  loadDashboardRunTrace,
+  type DashboardRunListFilters,
+  type DashboardRunSort,
+  type DashboardSessionFilter,
+} from './dashboard-runs.js';
+import {
   ProtocolValidationError,
   type InboundFrame,
   type OutboundFrame,
@@ -38,6 +45,8 @@ import { createGatewayLogger, type GatewayLogger } from './observability.js';
 import { subscribeToForwardedRealtimeEvents } from './realtime-events.js';
 import { getAuthorizedGatewaySession, openGatewaySession } from './session.js';
 import { createInMemoryGatewayStores, type GatewayStores } from './stores.js';
+import type { PostgresClient } from './stores-postgres.js';
+import type { MessageView } from './trace-session/types.js';
 
 export interface CreateGatewayServerOptions {
   fastify?: FastifyServerOptions;
@@ -45,6 +54,7 @@ export interface CreateGatewayServerOptions {
   hooks?: ResolvedGatewayHooks;
   agentRegistry?: AgentRegistry;
   stores?: GatewayStores;
+  traceClient?: PostgresClient;
   requestLogger?: GatewayLogger;
   now?: () => Date;
   sessionIdFactory?: () => string;
@@ -319,6 +329,16 @@ export async function createGatewayServer(
     },
   );
 
+  registerDashboardRunRoutes(app, {
+    auth: options.auth,
+    stores,
+    agentRegistry: options.agentRegistry,
+    gatewayConfig: config,
+    hooks: options.hooks,
+    traceClient: options.traceClient,
+    now: options.now,
+  });
+
   if (config.server.healthPath) {
     app.get(config.server.healthPath, async () => ({
       status: 'ok',
@@ -361,6 +381,180 @@ export async function createGatewayServer(
   return app;
 }
 
+interface DashboardRunRouteContext {
+  auth?: ResolvedGatewayAuthProvider;
+  stores: GatewayStores;
+  agentRegistry?: AgentRegistry;
+  gatewayConfig: GatewayConfig;
+  hooks?: ResolvedGatewayHooks;
+  traceClient?: PostgresClient;
+  now?: () => Date;
+}
+
+class DashboardRouteInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DashboardRouteInputError';
+  }
+}
+
+function registerDashboardRunRoutes(app: FastifyInstance, context: DashboardRunRouteContext): void {
+  app.get<{ Querystring: Record<string, string | string[] | undefined> }>('/api/runs', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted run dashboard routes require PostgreSQL runtime stores.'));
+    }
+
+    try {
+      return await listDashboardRootRuns(context.traceClient, parseDashboardRunListFilters(request.query));
+    } catch (error) {
+      if (error instanceof DashboardRouteInputError) {
+        return reply.code(400).send(createGatewayHttpError('invalid_frame', error.message));
+      }
+      throw error;
+    }
+  });
+
+  app.get<{
+    Params: { rootRunId: string };
+    Querystring: Record<string, string | string[] | undefined>;
+  }>('/api/runs/:rootRunId', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted run trace routes require PostgreSQL runtime stores.'));
+    }
+
+    try {
+      return await loadDashboardRunTrace(context.traceClient, request.params.rootRunId, parseDashboardTraceOptions(request.query));
+    } catch (error) {
+      if (error instanceof DashboardRouteInputError) {
+        return reply.code(400).send(createGatewayHttpError('invalid_frame', error.message));
+      }
+      throw error;
+    }
+  });
+
+  app.get<{
+    Params: { rootRunId: string };
+    Querystring: Record<string, string | string[] | undefined>;
+  }>('/api/runs/:rootRunId/messages', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted run trace routes require PostgreSQL runtime stores.'));
+    }
+
+    try {
+      const report = await loadDashboardRunTrace(context.traceClient, request.params.rootRunId, {
+        ...parseDashboardTraceOptions(request.query),
+        messages: true,
+        includePlans: false,
+      });
+      return {
+        target: report.target,
+        warnings: report.warnings,
+        messages: report.llmMessages,
+      };
+    } catch (error) {
+      if (error instanceof DashboardRouteInputError) {
+        return reply.code(400).send(createGatewayHttpError('invalid_frame', error.message));
+      }
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { rootRunId: string } }>('/api/runs/:rootRunId/timeline', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted run trace routes require PostgreSQL runtime stores.'));
+    }
+
+    const report = await loadDashboardRunTrace(context.traceClient, request.params.rootRunId, {
+      messages: false,
+      includePlans: false,
+    });
+    return {
+      target: report.target,
+      warnings: report.warnings,
+      timeline: report.timeline,
+    };
+  });
+
+  app.get<{ Params: { rootRunId: string } }>('/api/runs/:rootRunId/plans', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted run trace routes require PostgreSQL runtime stores.'));
+    }
+
+    const report = await loadDashboardRunTrace(context.traceClient, request.params.rootRunId, {
+      messages: false,
+      includePlans: true,
+    });
+    return {
+      target: report.target,
+      warnings: report.warnings,
+      plans: report.plans,
+    };
+  });
+
+  app.post<{ Params: { runId: string }; Body: { approved?: unknown; metadata?: JsonObject } }>('/api/runs/:runId/approval', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.agentRegistry) {
+      return reply.code(503).send(createGatewayHttpError('agent_registry_unavailable', 'Approval resolution requires an agent registry.'));
+    }
+    if (typeof request.body?.approved !== 'boolean') {
+      return reply.code(400).send(createGatewayHttpError('invalid_frame', 'Request body must include boolean field "approved".'));
+    }
+
+    const link = await resolveDashboardApprovalSessionLink(request.params.runId, context);
+    if (!link) {
+      return reply.code(409).send(createGatewayHttpError(
+        'approval_session_unavailable',
+        `No gateway run session is linked to run "${request.params.runId}". Sessionless approval resolution is not available through the gateway dashboard yet.`,
+      ));
+    }
+
+    try {
+      return await executeGatewayApprovalResolution({
+        type: 'approval.resolve',
+        sessionId: link.sessionId,
+        runId: request.params.runId,
+        approved: request.body.approved,
+        metadata: request.body.metadata,
+      }, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext,
+        hooks: context.hooks,
+        now: context.now,
+      });
+    } catch (error) {
+      if (error instanceof ProtocolValidationError) {
+        return reply.code(error.code === 'session_forbidden' ? 403 : 409).send(createGatewayHttpError(error.code, error.message, error.details));
+      }
+      throw error;
+    }
+  });
+}
+
 async function buildGatewayStatusReport(stores: GatewayStores, nowFactory: (() => Date) | undefined): Promise<JsonObject> {
   const checkedAt = (nowFactory ?? (() => new Date()))().toISOString();
   const [sessions, activeAdmissions] = await Promise.all([
@@ -394,6 +588,198 @@ function countBy<T>(values: T[], keyFor: (value: T) => string): Record<string, n
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
+}
+
+async function requireGatewayAdminHttpRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: ResolvedGatewayAuthProvider | undefined,
+): Promise<GatewayAuthContext | undefined> {
+  try {
+    const authContext = await authenticateGatewayHttpRequest({
+      auth,
+      headers: request.headers,
+    });
+
+    if (!authContext) {
+      throw new GatewayAuthError('auth_required', 'Gateway dashboard routes require an authenticated admin principal.', {
+        statusCode: 401,
+      });
+    }
+
+    if (!authContext.roles.includes('admin')) {
+      throw new GatewayAuthError('session_forbidden', 'Gateway dashboard routes require the admin role.', {
+        statusCode: 403,
+        details: { requiredRole: 'admin' },
+      });
+    }
+
+    return authContext;
+  } catch (error) {
+    if (error instanceof GatewayAuthError) {
+      void reply.code(error.statusCode).send(createAuthErrorFrame(error));
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function createGatewayHttpError(code: string, message: string, details?: JsonObject): JsonObject {
+  return {
+    type: 'error',
+    code,
+    message,
+    ...(details ? { details } : {}),
+  };
+}
+
+function parseDashboardRunListFilters(query: Record<string, string | string[] | undefined>): DashboardRunListFilters {
+  const filters: DashboardRunListFilters = {};
+  const from = firstQueryValue(query.from);
+  const to = firstQueryValue(query.to);
+  const status = query.status;
+  const session = firstQueryValue(query.session);
+  const sort = firstQueryValue(query.sort);
+
+  if (from) {
+    assertIsoDateQuery('from', from);
+    filters.from = from;
+  }
+  if (to) {
+    assertIsoDateQuery('to', to);
+    filters.to = to;
+  }
+  if (status) {
+    filters.status = (Array.isArray(status) ? status : status.split(','))
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+  }
+  if (session) {
+    filters.session = parseDashboardSessionFilter(session);
+  }
+  if (sort) {
+    filters.sort = parseDashboardRunSort(sort);
+  }
+
+  filters.sessionId = optionalTrimmedQueryValue(query.sessionId);
+  filters.rootRunId = optionalTrimmedQueryValue(query.rootRunId);
+  filters.runId = optionalTrimmedQueryValue(query.runId);
+  filters.delegateName = optionalTrimmedQueryValue(query.delegateName);
+  filters.q = optionalTrimmedQueryValue(query.q);
+  filters.limit = parseIntegerQueryValue('limit', query.limit);
+  filters.offset = parseIntegerQueryValue('offset', query.offset);
+
+  const requiresApproval = firstQueryValue(query.requiresApproval);
+  if (requiresApproval !== undefined) {
+    filters.requiresApproval = parseBooleanQueryValue('requiresApproval', requiresApproval);
+  }
+
+  return filters;
+}
+
+function parseDashboardTraceOptions(query: Record<string, string | string[] | undefined>): {
+  includePlans?: boolean;
+  messages?: boolean;
+  messagesView?: MessageView;
+  focusRunId?: string;
+} {
+  const includePlans = firstQueryValue(query.includePlans);
+  const messages = firstQueryValue(query.messages);
+  const messagesView = firstQueryValue(query.messagesView);
+  return {
+    ...(includePlans === undefined ? {} : { includePlans: parseBooleanQueryValue('includePlans', includePlans) }),
+    ...(messages === undefined ? {} : { messages: parseBooleanQueryValue('messages', messages) }),
+    ...(messagesView === undefined ? {} : { messagesView: parseMessageView(messagesView) }),
+    ...(optionalTrimmedQueryValue(query.focusRunId) ? { focusRunId: optionalTrimmedQueryValue(query.focusRunId) } : {}),
+  };
+}
+
+function firstQueryValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+function optionalTrimmedQueryValue(value: string | string[] | undefined): string | undefined {
+  const first = firstQueryValue(value)?.trim();
+  return first && first.length > 0 ? first : undefined;
+}
+
+function parseIntegerQueryValue(name: string, value: string | string[] | undefined): number | undefined {
+  const first = firstQueryValue(value);
+  if (first === undefined) {
+    return undefined;
+  }
+  const parsed = Number(first);
+  if (!Number.isInteger(parsed)) {
+    throw new DashboardRouteInputError(`Query parameter "${name}" must be an integer.`);
+  }
+  return parsed;
+}
+
+function parseBooleanQueryValue(name: string, value: string): boolean {
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  throw new DashboardRouteInputError(`Query parameter "${name}" must be "true" or "false".`);
+}
+
+function assertIsoDateQuery(name: string, value: string): void {
+  if (Number.isNaN(Date.parse(value))) {
+    throw new DashboardRouteInputError(`Query parameter "${name}" must be a valid date or ISO timestamp.`);
+  }
+}
+
+function parseDashboardSessionFilter(value: string): DashboardSessionFilter {
+  if (value === 'any' || value === 'linked' || value === 'sessionless') {
+    return value;
+  }
+  throw new DashboardRouteInputError('Query parameter "session" must be one of: any, linked, sessionless.');
+}
+
+function parseDashboardRunSort(value: string): DashboardRunSort {
+  if (value === 'created_desc' || value === 'updated_desc' || value === 'duration_desc' || value === 'cost_desc') {
+    return value;
+  }
+  throw new DashboardRouteInputError('Query parameter "sort" must be one of: created_desc, updated_desc, duration_desc, cost_desc.');
+}
+
+function parseMessageView(value: string): MessageView {
+  if (value === 'compact' || value === 'delta' || value === 'full') {
+    return value;
+  }
+  throw new DashboardRouteInputError('Query parameter "messagesView" must be one of: compact, delta, full.');
+}
+
+async function resolveDashboardApprovalSessionLink(runId: string, context: DashboardRunRouteContext): Promise<{ sessionId: string } | undefined> {
+  const directLink = await context.stores.sessionRunLinks.getByRunId(runId);
+  if (directLink?.invocationKind === 'run') {
+    return { sessionId: directLink.sessionId };
+  }
+
+  const rootRunId = await resolveDashboardRootRunId(runId, context.traceClient);
+  if (!rootRunId) {
+    return undefined;
+  }
+
+  const links = await context.stores.sessionRunLinks.listByRootRunId(rootRunId);
+  const latestRunLink = links.filter((link) => link.invocationKind === 'run').at(-1);
+  return latestRunLink ? { sessionId: latestRunLink.sessionId } : undefined;
+}
+
+async function resolveDashboardRootRunId(runId: string, traceClient: PostgresClient | undefined): Promise<string | undefined> {
+  if (!traceClient) {
+    return undefined;
+  }
+  const result = await traceClient.query<{ root_run_id: string }>(
+    `select root_run_id::text as root_run_id from agent_runs where id = $1`,
+    [runId],
+  );
+  return result.rows[0]?.root_run_id;
 }
 
 export async function handleGatewaySocketMessage(

@@ -942,6 +942,142 @@ label {
   white-space: nowrap;
 }
 
+.minimal-toolbar-icon-button {
+  align-items: center;
+  aspect-ratio: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: #9eb5ad;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
+  width: 2.3rem;
+}
+
+.minimal-toolbar-icon-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.minimal-toolbar-icon-button.active {
+  background: rgba(143, 240, 203, 0.14);
+  border-color: rgba(143, 240, 203, 0.4);
+  box-shadow: 0 0 0 4px rgba(143, 240, 203, 0.08);
+  color: #8ff0cb;
+}
+
+.minimal-settings-sheet {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 22px;
+  display: grid;
+  gap: 0.85rem;
+  margin-bottom: 0.75rem;
+  padding: 0.9rem;
+}
+
+.minimal-settings-head,
+.minimal-settings-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.6rem;
+}
+
+.minimal-settings-head {
+  justify-content: space-between;
+}
+
+.minimal-settings-copy {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.minimal-settings-copy h2 {
+  color: #edf7f3;
+  font-size: 0.96rem;
+}
+
+.minimal-settings-icon-button {
+  align-items: center;
+  aspect-ratio: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: #d4e5df;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
+  width: 2.45rem;
+}
+
+.minimal-settings-icon-button.primary {
+  background: linear-gradient(135deg, #8ff0cb 0%, #2bb08d 100%);
+  border-color: transparent;
+  color: #10362f;
+}
+
+.minimal-settings-fields {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.minimal-settings-sheet label {
+  color: #cadcd5;
+  display: grid;
+  font-size: 0.78rem;
+  font-weight: 600;
+  gap: 0.35rem;
+}
+
+.minimal-settings-sheet input,
+.minimal-settings-sheet textarea {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+  color: #edf7f3;
+}
+
+.minimal-settings-sheet input:focus,
+.minimal-settings-sheet textarea:focus {
+  border-color: #7bd1b1;
+  box-shadow: 0 0 0 3px rgba(123, 209, 177, 0.16);
+}
+
+.minimal-settings-toggle {
+  gap: 0.45rem;
+}
+
+.minimal-settings-toggle > span {
+  align-items: center;
+  color: #acc3ba;
+  display: inline-flex;
+  gap: 0.55rem;
+}
+
+.minimal-settings-toggle input {
+  width: auto;
+}
+
+.minimal-settings-note,
+.minimal-settings-error {
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+.minimal-settings-note {
+  color: #8ff0cb;
+}
+
+.minimal-settings-error {
+  color: #ffb0a1;
+}
+
 .minimal-connect-button {
   align-items: center;
   aspect-ratio: 1;
@@ -977,15 +1113,15 @@ label {
 .minimal-connect-button.connecting {
   background: rgba(255, 243, 202, 0.14);
   border-color: rgba(255, 243, 202, 0.32);
-  color: #ffe08a;
   box-shadow: 0 0 0 4px rgba(255, 243, 202, 0.06);
+  color: #ffe08a;
 }
 
 .minimal-connect-button.connected {
   background: rgba(143, 240, 203, 0.14);
   border-color: rgba(143, 240, 203, 0.4);
-  color: #8ff0cb;
   box-shadow: 0 0 0 4px rgba(143, 240, 203, 0.08);
+  color: #8ff0cb;
 }
 
 .minimal-connect-button.error {
@@ -1035,6 +1171,8 @@ label {
 
 .minimal-send-button svg,
 .minimal-icon-button svg,
+.minimal-settings-icon-button svg,
+.minimal-toolbar-icon-button svg,
 .minimal-connect-button svg {
   height: 1.15rem;
   width: 1.15rem;
@@ -1140,6 +1278,7 @@ label {
 
   .minimal-toolbar,
   .minimal-output-header,
+  .minimal-settings-head,
   .minimal-composer-top,
   .minimal-status-bar.pending,
   .minimal-status-bar.clarification {
@@ -1161,6 +1300,10 @@ label {
 
   .minimal-control-cluster {
     width: 100%;
+  }
+
+  .minimal-settings-actions {
+    justify-content: flex-start;
   }
 
   .minimal-markdown-output {

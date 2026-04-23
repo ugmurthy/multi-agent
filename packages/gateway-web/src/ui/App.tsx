@@ -60,6 +60,13 @@ const defaultIdentity: GatewayIdentity = {
   roles: ['member'],
 };
 
+interface SavedConnectionSettings {
+  socketUrl: string;
+  identity: GatewayIdentity;
+  useDevToken: boolean;
+  customToken: string;
+}
+
 export function App(): ReactElement {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [route, setRoute] = useState(readRoute());
@@ -78,6 +85,7 @@ export function App(): ReactElement {
   const [traceView, setTraceView] = useState<TraceView>('overview');
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState('');
+  const [settingsNotice, setSettingsNotice] = useState('');
   const [clockTick, setClockTick] = useState(() => Date.now());
   const clientRef = useRef<GatewayWebClient | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -90,14 +98,21 @@ export function App(): ReactElement {
         if (!active) {
           return;
         }
+
+        const saved = loadSavedConnectionSettings();
         setDefaults(loaded);
+        if (saved) {
+          setSocketUrl(saved.socketUrl);
+          setIdentity(saved.identity);
+          setUseDevToken(saved.useDevToken);
+          setCustomToken(saved.customToken);
+          return;
+        }
+
         setSocketUrl(loaded.socketUrl);
-        setIdentity({
-          channel: loaded.channel,
-          subject: loaded.subject,
-          tenantId: loaded.tenantId,
-          roles: loaded.roles,
-        });
+        setIdentity(gatewayIdentityFromDefaults(loaded));
+        setUseDevToken(true);
+        setCustomToken('');
       })
       .catch((loadError) => {
         setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -141,6 +156,15 @@ export function App(): ReactElement {
   }, []);
 
   useEffect(() => {
+    if (!settingsNotice) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setSettingsNotice(''), 2200);
+    return () => window.clearTimeout(timeoutId);
+  }, [settingsNotice]);
+
+  useEffect(() => {
     if (route === 'new') {
       setShowConnect(false);
       setComposerMode((current) => (current === 'chat' ? 'run' : current));
@@ -160,6 +184,7 @@ export function App(): ReactElement {
   const minimalOutputMarkdown = useMemo(() => buildMinimalOutputMarkdown(state), [state]);
   const statusLines = useMemo(() => buildStatusLines(state), [state]);
   const exportName = useMemo(() => buildExportFileStem(state), [state]);
+  const activeApproval = resolvePendingApproval(state, activeRun);
 
   useEffect(() => {
     const node = outputRef.current;
@@ -293,9 +318,30 @@ export function App(): ReactElement {
     void connect({ openSession: false });
   }
 
+  function saveCurrentConnectionSettings(): void {
+    saveConnectionSettings({
+      socketUrl,
+      identity,
+      useDevToken,
+      customToken,
+    });
+    setError('');
+    setSettingsNotice('Saved to this browser for future sessions.');
+    setShowConnect(false);
+  }
+
+  function resetConnectionSettingsForm(): void {
+    setSocketUrl(defaults.socketUrl);
+    setIdentity(gatewayIdentityFromDefaults(defaults));
+    setUseDevToken(true);
+    setCustomToken('');
+    setError('');
+    setSettingsNotice('Defaults restored. Save to keep them across sessions.');
+  }
+
   function resolveApproval(approval: PendingApproval, approved: boolean): void {
     try {
-      clientRef.current?.resolveApproval(approval.runId, approved);
+      clientRef.current?.resolveApproval(approval.runId, approved, approval.sessionId);
       dispatch({ type: 'clear-attention', runId: approval.runId });
       addFeed('system', `${approved ? 'Approved' : 'Rejected'} ${shortId(approval.runId)}.`);
     } catch (approvalError) {
@@ -360,7 +406,7 @@ export function App(): ReactElement {
   }
 
   if (route === 'new') {
-    const pendingApproval = state.pendingApproval;
+    const pendingApproval = activeApproval;
     const pendingClarification = state.pendingClarification;
     const composerPlaceholder = pendingClarification
       ? pendingClarification.message
@@ -399,9 +445,92 @@ export function App(): ReactElement {
                   >
                     <ConnectionIcon state={state.socketState} />
                   </button>
+                  <button
+                    className={`minimal-toolbar-icon-button ${showConnect ? 'active' : ''}`}
+                    type="button"
+                    aria-label={showConnect ? 'Hide connection settings' : 'Show connection settings'}
+                    aria-pressed={showConnect}
+                    title={showConnect ? 'Hide connection settings' : 'Show connection settings'}
+                    onClick={() => setShowConnect((value) => !value)}
+                  >
+                    <SettingsIcon />
+                  </button>
                 </div>
                 <span className="minimal-runtime-chip">{buildRuntimeLabel(activeRun, state.session.status, clockTick)}</span>
               </div>
+
+              {showConnect ? (
+                <section className="minimal-settings-sheet" aria-label="Connection settings">
+                  <div className="minimal-settings-head">
+                    <div className="minimal-settings-copy">
+                      <p className="eyebrow">Connection settings</p>
+                      <h2>Gateway session defaults</h2>
+                    </div>
+                    <div className="minimal-settings-actions">
+                      <button
+                        className="minimal-settings-icon-button"
+                        type="button"
+                        aria-label="Reset connection settings to defaults"
+                        title="Reset connection settings to defaults"
+                        onClick={resetConnectionSettingsForm}
+                      >
+                        <ResetIcon />
+                      </button>
+                      <button
+                        className="minimal-settings-icon-button primary"
+                        type="button"
+                        aria-label="Save connection settings"
+                        title="Save connection settings"
+                        onClick={saveCurrentConnectionSettings}
+                      >
+                        <SaveIcon />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="minimal-settings-fields">
+                    <label>
+                      Gateway socket
+                      <input value={socketUrl} onChange={(event) => setSocketUrl(event.target.value)} />
+                    </label>
+                    <label>
+                      Channel
+                      <input value={identity.channel} onChange={(event) => setIdentity({ ...identity, channel: event.target.value })} />
+                    </label>
+                    <label>
+                      Subject
+                      <input value={identity.subject} onChange={(event) => setIdentity({ ...identity, subject: event.target.value })} />
+                    </label>
+                    <label>
+                      Tenant
+                      <input value={identity.tenantId} onChange={(event) => setIdentity({ ...identity, tenantId: event.target.value })} />
+                    </label>
+                    <label>
+                      Roles
+                      <input
+                        value={identity.roles.join(', ')}
+                        onChange={(event) => setIdentity({ ...identity, roles: parseRoles(event.target.value) })}
+                      />
+                    </label>
+                    <label className="minimal-settings-toggle">
+                      Use local dev token
+                      <span>
+                        <input type="checkbox" checked={useDevToken} onChange={(event) => setUseDevToken(event.target.checked)} />
+                        <span>{useDevToken ? 'Enabled' : 'Disabled'}</span>
+                      </span>
+                    </label>
+                    {!useDevToken ? (
+                      <label>
+                        JWT
+                        <textarea value={customToken} onChange={(event) => setCustomToken(event.target.value)} rows={3} />
+                      </label>
+                    ) : null}
+                  </div>
+
+                  {settingsNotice ? <p className="minimal-settings-note">{settingsNotice}</p> : null}
+                  {error ? <p className="minimal-settings-error">{error}</p> : null}
+                </section>
+              ) : null}
 
               <form className="minimal-composer" onSubmit={(event) => void submitMinimalComposer(event)}>
                 <textarea
@@ -575,16 +704,16 @@ export function App(): ReactElement {
             ))}
           </div>
 
-          {state.pendingApproval ? (
+          {activeApproval ? (
             <section className="attention-card">
               <p className="eyebrow">Approval needed</p>
-              <h3>{state.pendingApproval.toolName ?? 'Tool request'}</h3>
-              <p>{state.pendingApproval.reason ?? 'The run is waiting for a decision.'}</p>
+              <h3>{activeApproval.toolName ?? 'Tool request'}</h3>
+              <p>{activeApproval.reason ?? 'The run is waiting for a decision.'}</p>
               <div className="button-row">
-                <button type="button" onClick={() => resolveApproval(state.pendingApproval as PendingApproval, true)}>
+                <button type="button" onClick={() => resolveApproval(activeApproval, true)}>
                   Approve
                 </button>
-                <button className="danger-button" type="button" onClick={() => resolveApproval(state.pendingApproval as PendingApproval, false)}>
+                <button className="danger-button" type="button" onClick={() => resolveApproval(activeApproval, false)}>
                   Reject
                 </button>
               </div>
@@ -912,6 +1041,30 @@ function inferRunStatus(event: LiveAgentEventSummary, sessionStatus: SessionStat
   return 'running';
 }
 
+function resolvePendingApproval(state: LiveGatewayState, activeRun: RunActivity | undefined): PendingApproval | undefined {
+  if (state.pendingApproval) {
+    return state.pendingApproval;
+  }
+
+  if (state.session.status !== 'awaiting_approval') {
+    return undefined;
+  }
+
+  const runId = state.session.activeRunId ?? activeRun?.runId;
+  if (!runId) {
+    return undefined;
+  }
+
+  const latestApprovalEvent = activeRun?.latestEvent?.eventType.includes('approval') ? activeRun.latestEvent : undefined;
+  return {
+    runId,
+    rootRunId: state.session.activeRootRunId ?? activeRun?.rootRunId,
+    sessionId: activeRun?.sessionId ?? state.session.runSessionId ?? state.session.sessionId,
+    toolName: latestApprovalEvent?.toolName,
+    reason: latestApprovalEvent?.detail,
+  };
+}
+
 function parseRoles(value: string): string[] {
   const roles = value
     .split(',')
@@ -945,6 +1098,34 @@ function SendIcon(): ReactElement {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 12h14" />
       <path d="m12 5 7 7-7 7" />
+    </svg>
+  );
+}
+
+function SaveIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 4h11l3 3v13H5z" />
+      <path d="M9 4v5h6" />
+      <path d="M9 16h6" />
+    </svg>
+  );
+}
+
+function ResetIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 11a8 8 0 1 0 2.35-5.66L3 8" />
+      <path d="M3 4v4h4" />
+    </svg>
+  );
+}
+
+function SettingsIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1 1 0 0 1 0 1.4l-1.1 1.1a1 1 0 0 1-1.4 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a1 1 0 0 1-1 1h-1.6a1 1 0 0 1-1-1v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a1 1 0 0 1-1.4 0l-1.1-1.1a1 1 0 0 1 0-1.4l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a1 1 0 0 1-1-1v-1.6a1 1 0 0 1 1-1h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a1 1 0 0 1 0-1.4l1.1-1.1a1 1 0 0 1 1.4 0l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a1 1 0 0 1 1.4 0l1.1 1.1a1 1 0 0 1 0 1.4l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6h.2a1 1 0 0 1 1 1v1.6a1 1 0 0 1-1 1h-.2a1 1 0 0 0-.9.6" />
     </svg>
   );
 }
@@ -1203,6 +1384,57 @@ function readRoute(): AppRoute {
 }
 
 const LIVE_STATE_STORAGE_KEY = 'agent-smith.gateway-web.live-state.v1';
+const CONNECTION_SETTINGS_STORAGE_KEY = 'agent-smith.gateway-web.connection-settings.v1';
+
+function gatewayIdentityFromDefaults(defaults: GatewayDefaults): GatewayIdentity {
+  return {
+    channel: defaults.channel,
+    subject: defaults.subject,
+    tenantId: defaults.tenantId,
+    roles: defaults.roles,
+  };
+}
+
+function saveConnectionSettings(settings: SavedConnectionSettings): void {
+  localStorage.setItem(CONNECTION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+}
+
+function loadSavedConnectionSettings(): SavedConnectionSettings | undefined {
+  const raw = localStorage.getItem(CONNECTION_SETTINGS_STORAGE_KEY);
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<SavedConnectionSettings> & {
+      identity?: Partial<GatewayIdentity>;
+    };
+    if (
+      typeof parsed.socketUrl !== 'string' ||
+      typeof parsed.identity?.channel !== 'string' ||
+      typeof parsed.identity.subject !== 'string' ||
+      typeof parsed.identity.tenantId !== 'string'
+    ) {
+      return undefined;
+    }
+
+    return {
+      socketUrl: parsed.socketUrl,
+      identity: {
+        channel: parsed.identity.channel,
+        subject: parsed.identity.subject,
+        tenantId: parsed.identity.tenantId,
+        roles: Array.isArray(parsed.identity.roles)
+          ? parsed.identity.roles.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
+          : ['member'],
+      },
+      useDevToken: typeof parsed.useDevToken === 'boolean' ? parsed.useDevToken : true,
+      customToken: typeof parsed.customToken === 'string' ? parsed.customToken : '',
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 function saveLiveState(state: LiveGatewayState): void {
   const snapshot: LiveGatewayState = {
