@@ -1,4 +1,5 @@
 import type { PostgresClient } from './stores-postgres.js';
+import { runWithPostgresTransaction } from './postgres.js';
 import { traceSession } from './trace-session/data.js';
 import type { MessageView, TraceReport } from './trace-session/types.js';
 
@@ -25,6 +26,7 @@ export interface DashboardRunListItem {
   rootRunId: string;
   sessionId: string | null;
   status: string | null;
+  goal: string | null;
   goalPreview: string | null;
   agentId: string | null;
   modelProvider: string | null;
@@ -57,10 +59,46 @@ export interface DashboardRunListResult {
   nextOffset: number | null;
 }
 
+export interface DashboardDeleteEmptySessionsResult {
+  deletedSessions: number;
+  deletedTranscriptMessages: number;
+  clearedCronRuns: number;
+  clearedRunAdmissions: number;
+}
+
+export interface DashboardDeleteSessionResult {
+  sessionId: string;
+  deletedSessions: number;
+  deletedTranscriptMessages: number;
+  deletedSessionRunLinks: number;
+  clearedCronRuns: number;
+  clearedRunAdmissions: number;
+}
+
+export interface DashboardDeleteSessionlessRunResult {
+  rootRunId: string;
+  deletedRuns: number;
+  deletedPlans: number;
+  deletedCronRuns: number;
+  deletedRunAdmissions: number;
+}
+
+export class DashboardDeleteConflictError extends Error {
+  constructor(
+    message: string,
+    readonly code: 'session_active' | 'run_linked_to_session' | 'run_not_terminal',
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'DashboardDeleteConflictError';
+  }
+}
+
 interface DashboardRunListRow {
   root_run_id: string;
   session_id: string | null;
   status: string | null;
+  goal: string | null;
   goal_preview: string | null;
   agent_id: string | null;
   model_provider: string | null;
@@ -200,6 +238,7 @@ export async function listDashboardRootRuns(
         root.id::text as root_run_id,
         link.session_id,
         root.status,
+        root.goal,
         left(regexp_replace(root.goal, '\\s+', ' ', 'g'), 180) as goal_preview,
         root.metadata ->> 'agentId' as agent_id,
         root.model_provider,
@@ -269,11 +308,217 @@ export async function loadDashboardRunTrace(
   });
 }
 
+export async function deleteDashboardEmptySessions(client: PostgresClient): Promise<DashboardDeleteEmptySessionsResult> {
+  return await runWithPostgresTransaction(client, async (transactionClient) => {
+    const sessionsResult = await transactionClient.query<{ id: string }>(`
+      select s.id
+      from gateway_sessions s
+      where not exists (
+        select 1
+        from gateway_session_run_links l
+        where l.session_id = s.id
+      )
+      for update
+    `);
+    const sessionIds = sessionsResult.rows.map((row) => row.id);
+    if (sessionIds.length === 0) {
+      return {
+        deletedSessions: 0,
+        deletedTranscriptMessages: 0,
+        clearedCronRuns: 0,
+        clearedRunAdmissions: 0,
+      };
+    }
+
+    const transcriptResult = await transactionClient.query(
+      `delete from gateway_transcript_messages where session_id = any($1::text[])`,
+      [sessionIds],
+    );
+    const cronResult = await transactionClient.query(
+      `update gateway_cron_runs set session_id = null where session_id = any($1::text[])`,
+      [sessionIds],
+    );
+    const admissionResult = await transactionClient.query(
+      `update gateway_run_admissions set session_id = null, updated_at = now() where session_id = any($1::text[])`,
+      [sessionIds],
+    );
+    const sessionResult = await transactionClient.query(
+      `delete from gateway_sessions where id = any($1::text[])`,
+      [sessionIds],
+    );
+
+    return {
+      deletedSessions: sessionResult.rowCount,
+      deletedTranscriptMessages: transcriptResult.rowCount,
+      clearedCronRuns: cronResult.rowCount,
+      clearedRunAdmissions: admissionResult.rowCount,
+    };
+  });
+}
+
+export async function deleteDashboardSession(
+  client: PostgresClient,
+  sessionId: string,
+): Promise<DashboardDeleteSessionResult> {
+  return await runWithPostgresTransaction(client, async (transactionClient) => {
+    const sessionResult = await transactionClient.query<{ status: string }>(
+      `select status from gateway_sessions where id = $1 for update`,
+      [sessionId],
+    );
+    const session = sessionResult.rows[0];
+    if (session?.status === 'running' || session?.status === 'awaiting_approval') {
+      throw new DashboardDeleteConflictError(
+        `Session "${sessionId}" is ${session.status}; only idle, failed, closed, or missing sessions can be deleted.`,
+        'session_active',
+        { sessionId, status: session.status },
+      );
+    }
+
+    const transcriptResult = await transactionClient.query(
+      `delete from gateway_transcript_messages where session_id = $1`,
+      [sessionId],
+    );
+    const linksResult = await transactionClient.query(
+      `delete from gateway_session_run_links where session_id = $1`,
+      [sessionId],
+    );
+    const cronResult = await transactionClient.query(
+      `update gateway_cron_runs set session_id = null where session_id = $1`,
+      [sessionId],
+    );
+    const admissionResult = await transactionClient.query(
+      `update gateway_run_admissions set session_id = null, updated_at = now() where session_id = $1`,
+      [sessionId],
+    );
+    const sessionDeleteResult = await transactionClient.query(
+      `delete from gateway_sessions where id = $1`,
+      [sessionId],
+    );
+
+    return {
+      sessionId,
+      deletedSessions: sessionDeleteResult.rowCount,
+      deletedTranscriptMessages: transcriptResult.rowCount,
+      deletedSessionRunLinks: linksResult.rowCount,
+      clearedCronRuns: cronResult.rowCount,
+      clearedRunAdmissions: admissionResult.rowCount,
+    };
+  });
+}
+
+export async function deleteDashboardSessionlessRun(
+  client: PostgresClient,
+  rootRunId: string,
+): Promise<DashboardDeleteSessionlessRunResult> {
+  return await runWithPostgresTransaction(client, async (transactionClient) => {
+    const rootResult = await transactionClient.query<{ id: string }>(
+      `
+        select id::text as id
+        from agent_runs
+        where id = $1::uuid
+          and root_run_id = id
+        for update
+      `,
+      [rootRunId],
+    );
+    if (!rootResult.rows[0]) {
+      return {
+        rootRunId,
+        deletedRuns: 0,
+        deletedPlans: 0,
+        deletedCronRuns: 0,
+        deletedRunAdmissions: 0,
+      };
+    }
+
+    const linkResult = await transactionClient.query<{ count: string | number }>(
+      `select count(*) as count from gateway_session_run_links where root_run_id = $1`,
+      [rootRunId],
+    );
+    const linkedSessionCount = Number(linkResult.rows[0]?.count ?? 0);
+    if (linkedSessionCount > 0) {
+      throw new DashboardDeleteConflictError(
+        `Root run "${rootRunId}" is linked to a gateway session and cannot be deleted as sessionless.`,
+        'run_linked_to_session',
+        { rootRunId, linkedSessionCount },
+      );
+    }
+
+    const activeResult = await transactionClient.query<{ status: string; count: string | number }>(
+      `
+        select status, count(*) as count
+        from agent_runs
+        where root_run_id = $1::uuid
+          and status <> all($2::text[])
+        group by status
+        order by status asc
+      `,
+      [rootRunId, ['succeeded', 'failed', 'clarification_requested', 'replan_required', 'cancelled']],
+    );
+    if (activeResult.rows.length > 0) {
+      throw new DashboardDeleteConflictError(
+        `Root run "${rootRunId}" contains non-terminal runs and cannot be deleted.`,
+        'run_not_terminal',
+        {
+          rootRunId,
+          statuses: activeResult.rows.map((row) => ({ status: row.status, count: Number(row.count) })),
+        },
+      );
+    }
+
+    const cronResult = await transactionClient.query(
+      `delete from gateway_cron_runs where root_run_id = $1`,
+      [rootRunId],
+    );
+    const admissionResult = await transactionClient.query(
+      `delete from gateway_run_admissions where root_run_id = $1`,
+      [rootRunId],
+    );
+    const planResult = await transactionClient.query(
+      `
+        delete from plans
+        where created_from_run_id in (
+          select id from agent_runs where root_run_id = $1::uuid
+        )
+      `,
+      [rootRunId],
+    );
+
+    await transactionClient.query(
+      `
+        update agent_runs
+        set current_child_run_id = null,
+            current_plan_id = null,
+            current_plan_execution_id = null
+        where root_run_id = $1::uuid
+      `,
+      [rootRunId],
+    );
+    const childRunResult = await transactionClient.query(
+      `delete from agent_runs where root_run_id = $1::uuid and id <> $1::uuid`,
+      [rootRunId],
+    );
+    const rootRunResult = await transactionClient.query(
+      `delete from agent_runs where id = $1::uuid`,
+      [rootRunId],
+    );
+
+    return {
+      rootRunId,
+      deletedRuns: childRunResult.rowCount + rootRunResult.rowCount,
+      deletedPlans: planResult.rowCount,
+      deletedCronRuns: cronResult.rowCount,
+      deletedRunAdmissions: admissionResult.rowCount,
+    };
+  });
+}
+
 function dashboardRunListItemFromRow(row: DashboardRunListRow): DashboardRunListItem {
   return {
     rootRunId: row.root_run_id,
     sessionId: row.session_id,
     status: row.status,
+    goal: row.goal,
     goalPreview: row.goal_preview,
     agentId: row.agent_id,
     modelProvider: row.model_provider,

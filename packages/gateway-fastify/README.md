@@ -161,6 +161,7 @@ File: `config/gateway.json`
     "port": 3000,
     "websocketPath": "/ws",
     "healthPath": "/health",
+    "requestLogger": false,
     "requestLogging": "info",
     "requestLoggingDestination": "both"
   },
@@ -238,6 +239,7 @@ File: `config/gateway.json`
 | `server.port` | Yes | Listen port |
 | `server.websocketPath` | Yes | WebSocket upgrade path (must start with `/`) |
 | `server.healthPath` | No | HTTP health endpoint path |
+| `server.requestLogger` | No | Enable HTTP request/response logs; defaults to `false` |
 | `server.requestLogging` | No | Request log level: `debug`, `info`, `warn`, or `silent`; `true` maps to `info` and `false` maps to `silent` for backward compatibility |
 | `server.requestLoggingDestination` | No | Request log sink: `console`, `file`, or `both`; defaults to `console` when request logging is enabled |
 | `stores.kind` | No | Storage backend: `memory`, `file`, or `postgres`; defaults to `memory` |
@@ -269,7 +271,11 @@ File: `config/gateway.json`
 | `defaultAgentId` | No | Fallback agent when no binding matches |
 | `hooks` | Yes | Hook slot configuration |
 
-When `server.requestLogging` is `debug`, the gateway emits debug, info, warn, and error request logs. `info` emits info, warn, and error logs. `warn` emits warn and error logs. `silent` disables gateway request logging entirely.
+Set `server.requestLogger` to `true` to enable HTTP request/response logs. When it is omitted or `false`, the gateway skips the HTTP `onRequest` and `onResponse` log entries.
+
+`server.requestLogger` only affects HTTP request/response entries. It does not change whether other gateway transport logs, such as WebSocket frame logs, are emitted; those still follow `server.requestLogging`.
+
+When `server.requestLogger` is `true` and `server.requestLogging` is `debug`, the gateway emits debug, info, warn, and error request logs. `info` emits info, warn, and error logs. `warn` emits warn and error logs. `silent` disables gateway request logging entirely.
 
 When `server.requestLoggingDestination` is `file` or `both`, the gateway writes newline-delimited JSON logs to `data/gateway/logs/gateway-YYYY-MM-DD.log` relative to the current working directory by default. The local `gateway:start` launcher writes these logs under `~/.adaptiveAgent/data/gateway/logs`.
 

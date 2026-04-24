@@ -204,6 +204,7 @@ describe('bootstrapGateway cron lifecycle', () => {
             port: 3000,
             websocketPath: '/ws',
             healthPath: '/health',
+            requestLogger: true,
             requestLogging: true,
             requestLoggingDestination: 'file',
           },
@@ -286,6 +287,90 @@ describe('bootstrapGateway cron lifecycle', () => {
     expect(stopped?.data?.durationMs).toBeGreaterThanOrEqual(0);
     expect(logContents).toContain('"event":"http.request.started"');
     expect(logContents).toContain('"event":"http.request.completed"');
+  });
+
+  it('keeps HTTP request logging off by default', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    const agentDirectory = join(workspace, 'agents');
+    const logDir = join(workspace, 'logs');
+    const agentConfigPath = join(agentDirectory, 'test-agent.json');
+
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+            healthPath: '/health',
+            requestLogging: 'info',
+            requestLoggingDestination: 'file',
+          },
+          bindings: [],
+          defaultAgentId: 'test-agent',
+          hooks: {
+            failurePolicy: 'fail',
+            modules: [],
+            onAuthenticate: [],
+            onSessionResolve: [],
+            beforeRoute: [],
+            beforeInboundMessage: [],
+            beforeRunStart: [],
+            afterRunResult: [],
+            onAgentEvent: [],
+            beforeOutboundFrame: [],
+            onDisconnect: [],
+            onError: [],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(
+      agentConfigPath,
+      JSON.stringify(
+        {
+          id: 'test-agent',
+          name: 'Test Agent',
+          invocationModes: ['chat', 'run'],
+          defaultInvocationMode: 'chat',
+          model: {
+            provider: 'openrouter',
+            model: 'test',
+          },
+          tools: [],
+          delegates: [],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const gateway = await bootstrapGateway({
+      gatewayConfigPath,
+      agentConfigDir: agentDirectory,
+      agentFactory: () => createStubAgent(),
+      logDir,
+    });
+
+    try {
+      await gateway.app.listen({ host: '127.0.0.1', port: 0 });
+      await gateway.app.inject({ method: 'GET', url: '/health' });
+    } finally {
+      await gateway.app.close();
+    }
+
+    const logContents = await readFile(join(logDir, `gateway-${formatLogDate()}.log`), 'utf-8');
+
+    expect(logContents).toContain('"event":"gateway.server.started"');
+    expect(logContents).not.toContain('"event":"http.request.started"');
+    expect(logContents).not.toContain('"event":"http.request.completed"');
   });
 
   it('resolves shared Postgres runtime stores on the default bootstrap path when stores.kind is postgres', async () => {

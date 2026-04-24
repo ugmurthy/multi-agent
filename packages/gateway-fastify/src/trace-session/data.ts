@@ -433,6 +433,8 @@ async function loadRootRuns(client: PostgresClient, rootRunIds: string[], sessio
     status: string | null;
     goal: string | null;
     result: unknown;
+    error_code: string | null;
+    error_message: string | null;
     model_provider: string | null;
     model_name: string | null;
   }>(
@@ -450,6 +452,8 @@ async function loadRootRuns(client: PostgresClient, rootRunIds: string[], sessio
         r.status,
         r.goal,
         r.result,
+        r.error_code,
+        r.error_message,
         ${modelColumns}
       from requested_roots rr
       join agent_runs r on r.id = rr.root_run_id
@@ -476,6 +480,8 @@ async function loadRootRuns(client: PostgresClient, rootRunIds: string[], sessio
     status: row.status,
     goal: row.goal,
     result: row.result,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
     modelProvider: row.model_provider,
     modelName: row.model_name,
   }));

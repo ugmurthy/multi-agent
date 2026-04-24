@@ -365,6 +365,61 @@ describe('trace-session CLI helpers', () => {
     expect(summary.reason).toContain('tool exploded');
   });
 
+  it('surfaces the persisted root run failure detail in the summary', () => {
+    const summary = summarizeTrace(
+      session('failed'),
+      [{
+        rootRunId: 'root-failed',
+        runId: 'root-failed',
+        invocationKind: 'run',
+        turnIndex: 0,
+        linkedAt: now(),
+        status: 'failed',
+        goal: 'Finish the task',
+        result: null,
+        errorCode: 'MODEL_ERROR',
+        errorMessage: 'Model timed out after 90000ms',
+      }],
+      [],
+      [],
+    );
+
+    expect(summary).toEqual({
+      status: 'failed',
+      reason: 'failed because root run root-failed failed: Model timed out after 90000ms',
+    });
+  });
+
+  it('surfaces tool span failure detail in the summary when no root run error is available', () => {
+    const summary = summarizeTrace(
+      session('failed'),
+      [],
+      [{
+        rootRunId: 'root-1',
+        runId: 'root-1',
+        depth: 0,
+        stepId: 'step-1',
+        toolCallId: 'tool-1',
+        eventType: 'tool.failed',
+        toolName: 'web_search',
+        params: null,
+        output: null,
+        startedAt: now(),
+        completedAt: now(),
+        durationMs: 123,
+        outcome: 'failed: Timed out after 90000ms',
+        childRunId: null,
+        eventSeq: 3,
+      }],
+      [],
+    );
+
+    expect(summary).toEqual({
+      status: 'failed',
+      reason: 'failed because tool web_search failed: Timed out after 90000ms',
+    });
+  });
+
   it('explains a delegate stuck in awaiting_subagent', () => {
     const stuck = delegate({ child_status: 'awaiting_subagent' });
     expect(computeDelegateReason(stuck)).toBe('waiting on its own child');

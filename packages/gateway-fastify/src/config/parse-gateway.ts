@@ -137,6 +137,10 @@ export function resolveGatewayRequestLogLevel(
   return requestLogging;
 }
 
+export function resolveGatewayRequestLoggerEnabled(server: GatewayServerConfig): boolean {
+  return server.requestLogger ?? false;
+}
+
 function parseGatewayStoreConfig(value: unknown, path: string, issues: string[]): GatewayStoreConfig | undefined {
   if (value === undefined) {
     return undefined;
@@ -176,6 +180,7 @@ function parseGatewayServerConfig(value: unknown, path: string, issues: string[]
     port: expectPositiveInteger(server?.port, `${path}.port`, issues) ?? 0,
     websocketPath: expectHttpPath(server?.websocketPath, `${path}.websocketPath`, issues) ?? '/ws',
     healthPath: expectOptionalHttpPath(server?.healthPath, `${path}.healthPath`, issues),
+    requestLogger: expectOptionalBoolean(server?.requestLogger, `${path}.requestLogger`, issues),
     requestLogging: parseGatewayRequestLoggingValue(server?.requestLogging, `${path}.requestLogging`, issues),
     requestLoggingDestination:
       server?.requestLoggingDestination === undefined

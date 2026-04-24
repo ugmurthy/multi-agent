@@ -4,6 +4,7 @@
     "port": 3000,
     "websocketPath": "/ws",
     "healthPath": "/health",
+    "requestLogger": false,
     "requestLogging": "info",
     "requestLoggingDestination": "both"
   },

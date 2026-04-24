@@ -192,6 +192,11 @@ export function parseAgentDefaults(value: unknown, path: string, issues: string[
     expectOptionalBoolean(defaults?.requireApprovalForWriteTools, `${path}.requireApprovalForWriteTools`, issues),
   );
   assignIfDefined(parsedDefaults, 'autoApproveAll', expectOptionalBoolean(defaults?.autoApproveAll, `${path}.autoApproveAll`, issues));
+  assignIfDefined(
+    parsedDefaults,
+    'injectToolManifest',
+    expectOptionalBoolean(defaults?.injectToolManifest, `${path}.injectToolManifest`, issues),
+  );
 
   if (defaults?.capture !== undefined) {
     const capture = expectEnum(defaults.capture, CAPTURE_MODES, `${path}.capture`, issues);

@@ -157,8 +157,28 @@ export function summarizeTrace(
   }
 
   const failedRoot = rootRuns.find((run) => run.status === 'failed');
-  if (failedRoot || timeline.some((entry) => entry.outcome.startsWith('failed'))) {
-    return { status: 'failed', reason: 'failed because a root run or tool span reached a failed terminal outcome' };
+  if (failedRoot) {
+    const detail = failedRoot.errorMessage ?? failedRoot.errorCode;
+    return {
+      status: 'failed',
+      reason: detail
+        ? `failed because root run ${shortId(failedRoot.rootRunId)} failed: ${detail}`
+        : `failed because root run ${shortId(failedRoot.rootRunId)} reached a failed terminal outcome`,
+    };
+  }
+
+  const failedTimeline = timeline.find((entry) => entry.outcome.startsWith('failed'));
+  if (failedTimeline) {
+    const detail = detailFromTimelineOutcome(failedTimeline.outcome);
+    const subject = failedTimeline.toolName
+      ? `tool ${failedTimeline.toolName}`
+      : `run ${shortId(failedTimeline.runId)}`;
+    return {
+      status: 'failed',
+      reason: detail
+        ? `failed because ${subject} failed: ${detail}`
+        : `failed because ${subject} reached a failed terminal outcome`,
+    };
   }
 
   if (rootRuns.length > 0 && rootRuns.every((run) => run.status === 'succeeded')) {
@@ -323,6 +343,11 @@ function terminalOutcome(input: {
     return input.status;
   }
   return input.eventType ?? 'observed';
+}
+
+function detailFromTimelineOutcome(outcome: string): string | null {
+  const prefix = 'failed: ';
+  return outcome.startsWith(prefix) ? outcome.slice(prefix.length) : null;
 }
 
 export function isHistoricalTrace(rows: TraceRow[]): boolean {

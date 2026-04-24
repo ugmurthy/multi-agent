@@ -3,7 +3,12 @@ import { resolve } from 'node:path';
 
 import { ConfigValidationError } from './errors.js';
 import { validateAgentConfig } from './config/parse-agent.js';
-import { resolveGatewayConcurrencyConfig, resolveGatewayRequestLogLevel, validateGatewayConfig } from './config/parse-gateway.js';
+import {
+  resolveGatewayConcurrencyConfig,
+  resolveGatewayRequestLogLevel,
+  resolveGatewayRequestLoggerEnabled,
+  validateGatewayConfig,
+} from './config/parse-gateway.js';
 import {
   DEFAULT_AGENT_CONFIG_DIR,
   DEFAULT_GATEWAY_CONFIG_PATH,
@@ -40,6 +45,7 @@ export {
   DEFAULT_GATEWAY_CONFIG_PATH,
   GATEWAY_HOOK_SLOTS,
   resolveGatewayRequestLogLevel,
+  resolveGatewayRequestLoggerEnabled,
   resolveGatewayConcurrencyConfig,
 };
 export type {

@@ -45,6 +45,8 @@ export interface RootRun {
   status: string | null;
   goal: string | null;
   result: unknown;
+  errorCode?: string | null;
+  errorMessage?: string | null;
   modelProvider?: string | null;
   modelName?: string | null;
 }

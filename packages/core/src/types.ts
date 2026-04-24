@@ -88,6 +88,8 @@ export interface AgentDefaults {
   capture?: CaptureMode;
   toolBudgets?: Record<string, ToolBudget>;
   researchPolicy?: ResearchPolicyName | ResearchPolicy;
+  /** When false, skip the initial system manifest that describes callable tools and delegates. */
+  injectToolManifest?: boolean;
 }
 
 export interface ToolBudget {

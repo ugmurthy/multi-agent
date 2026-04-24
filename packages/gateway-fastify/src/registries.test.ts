@@ -25,8 +25,8 @@ function createDelegate(name: string): DelegateDefinition {
 describe('ModuleRegistry', () => {
   it('resolves tool, delegate, hook, and auth provider references', () => {
     const registry = createModuleRegistry({
-      tools: [createTool('read_file')],
-      delegates: [createDelegate('researcher')],
+      tools: [createTool('read_file'), createTool('write_file')],
+      delegates: [createDelegate('researcher'), createDelegate('writer')],
       hooks: [
         {
           id: 'audit',

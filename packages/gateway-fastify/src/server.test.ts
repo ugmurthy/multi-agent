@@ -194,6 +194,7 @@ describe('createGatewayServer', () => {
           root_run_id: 'root-1',
           session_id: 'session-1',
           status: 'awaiting_approval',
+          goal: 'Review quota limits',
           goal_preview: 'Review quota limits',
           agent_id: 'support-agent',
           model_provider: 'openai',
@@ -234,6 +235,7 @@ describe('createGatewayServer', () => {
         rootRunId: 'root-1',
         sessionId: 'session-1',
         status: 'awaiting_approval',
+        goal: 'Review quota limits',
         goalPreview: 'Review quota limits',
         agentId: 'support-agent',
         modelProvider: 'openai',
@@ -303,6 +305,140 @@ describe('createGatewayServer', () => {
       code: 'trace_store_unavailable',
       message: 'Persisted run dashboard routes require PostgreSQL runtime stores.',
     });
+  });
+
+  it('deletes gateway sessions with no linked root runs', async () => {
+    const querySpy = vi.fn(async <TRow extends Record<string, unknown>>(sql: string, params?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('select s.id')) {
+        expect(params).toBeUndefined();
+        expect(sql).toContain('gateway_session_run_links');
+        return { rows: [{ id: 'session-empty-1' }, { id: 'session-empty-2' }], rowCount: 2 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      expect(params).toEqual([['session-empty-1', 'session-empty-2']]);
+      if (sql.includes('gateway_transcript_messages')) {
+        return { rows: [], rowCount: 3 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('gateway_cron_runs')) {
+        return { rows: [], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('gateway_run_admissions')) {
+        return { rows: [], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('delete from gateway_sessions')) {
+        return { rows: [], rowCount: 2 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['admin']),
+      traceClient: { query: querySpy },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: '/api/sessions/empty',
+      headers: { authorization: 'Bearer admin-token' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      deletedSessions: 2,
+      deletedTranscriptMessages: 3,
+      clearedCronRuns: 1,
+      clearedRunAdmissions: 1,
+    });
+    expect(querySpy.mock.calls.map((call) => call[0])).toContain('COMMIT');
+  });
+
+  it('deletes a gateway session and associated gateway records', async () => {
+    const querySpy = vi.fn(async <TRow extends Record<string, unknown>>(sql: string, params?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      expect(params).toEqual(['session-1']);
+      if (sql.includes('select status from gateway_sessions')) {
+        return { rows: [{ status: 'idle' }], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('gateway_transcript_messages')) {
+        return { rows: [], rowCount: 2 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('gateway_session_run_links')) {
+        return { rows: [], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('gateway_cron_runs')) {
+        return { rows: [], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('gateway_run_admissions')) {
+        return { rows: [], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('delete from gateway_sessions')) {
+        return { rows: [], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['admin']),
+      traceClient: { query: querySpy },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: '/api/sessions/session-1',
+      headers: { authorization: 'Bearer admin-token' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      sessionId: 'session-1',
+      deletedSessions: 1,
+      deletedTranscriptMessages: 2,
+      deletedSessionRunLinks: 1,
+      clearedCronRuns: 1,
+      clearedRunAdmissions: 1,
+    });
+    expect(querySpy.mock.calls.map((call) => call[0])).toContain('COMMIT');
+  });
+
+  it('rejects sessionless run deletion when a session link exists', async () => {
+    const rootRunId = '00000000-0000-4000-8000-000000000001';
+    const querySpy = vi.fn(async <TRow extends Record<string, unknown>>(sql: string, params?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      expect(params?.[0]).toBe(rootRunId);
+      if (sql.includes('from agent_runs') && sql.includes('for update')) {
+        return { rows: [{ id: rootRunId }], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      if (sql.includes('from gateway_session_run_links')) {
+        return { rows: [{ count: '1' }], rowCount: 1 } as unknown as { rows: TRow[]; rowCount: number };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await createGatewayServer(baseConfig, {
+      auth: createStaticAuthProvider(['admin']),
+      traceClient: { query: querySpy },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/runs/${rootRunId}`,
+      headers: { authorization: 'Bearer admin-token' },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      type: 'error',
+      code: 'run_linked_to_session',
+      message: `Root run "${rootRunId}" is linked to a gateway session and cannot be deleted as sessionless.`,
+      details: { rootRunId, linkedSessionCount: 1 },
+    });
+    expect(querySpy.mock.calls.map((call) => call[0])).toContain('ROLLBACK');
   });
 
   it('logs HTTP requests when request logging is enabled', async () => {

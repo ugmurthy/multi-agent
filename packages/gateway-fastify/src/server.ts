@@ -18,9 +18,13 @@ import {
   type ChannelSubscriptionManager,
 } from './channels.js';
 import { executeGatewayChatTurn } from './chat.js';
-import { resolveGatewayRequestLogLevel, type GatewayConfig } from './config.js';
+import { resolveGatewayRequestLogLevel, resolveGatewayRequestLoggerEnabled, type GatewayConfig } from './config.js';
 import type { JsonObject, JsonValue } from './core.js';
 import {
+  DashboardDeleteConflictError,
+  deleteDashboardEmptySessions,
+  deleteDashboardSession,
+  deleteDashboardSessionlessRun,
   listDashboardRootRuns,
   loadDashboardRunTrace,
   type DashboardRunListFilters,
@@ -101,6 +105,7 @@ export async function createGatewayServer(
         })
       : undefined);
   const shouldCloseRequestLogger = options.requestLogger === undefined && requestLogger !== undefined;
+  const shouldLogHttpRequests = requestLogger !== undefined && resolveGatewayRequestLoggerEnabled(config.server);
 
   if (requestLogger) {
     const requestStartTimes = new WeakMap<object, bigint>();
@@ -111,36 +116,38 @@ export async function createGatewayServer(
       });
     }
 
-    app.addHook('onRequest', async (request) => {
-      requestStartTimes.set(request.raw, process.hrtime.bigint());
+    if (shouldLogHttpRequests) {
+      app.addHook('onRequest', async (request) => {
+        requestStartTimes.set(request.raw, process.hrtime.bigint());
 
-      requestLogger.info('http.request.started', 'HTTP request started', {
-        requestId: request.id,
-        method: request.method,
-        url: sanitizeLoggedUrl(request.url),
-        remoteAddress: request.ip,
-      });
-    });
-
-    app.addHook('onResponse', async (request, reply) => {
-      const startedAt = requestStartTimes.get(request.raw);
-      const durationMs = startedAt ? Number(process.hrtime.bigint() - startedAt) / 1_000_000 : undefined;
-
-      requestLogger.info('http.request.completed', 'HTTP request completed', {
-        requestId: request.id,
-        method: request.method,
-        url: sanitizeLoggedUrl(request.url),
-        statusCode: reply.statusCode,
-        remoteAddress: request.ip,
-        ...(durationMs === undefined
-          ? {}
-          : {
-              durationMs: Math.round(durationMs * 1000) / 1000,
-            }),
+        requestLogger.info('http.request.started', 'HTTP request started', {
+          requestId: request.id,
+          method: request.method,
+          url: sanitizeLoggedUrl(request.url),
+          remoteAddress: request.ip,
+        });
       });
 
-      requestStartTimes.delete(request.raw);
-    });
+      app.addHook('onResponse', async (request, reply) => {
+        const startedAt = requestStartTimes.get(request.raw);
+        const durationMs = startedAt ? Number(process.hrtime.bigint() - startedAt) / 1_000_000 : undefined;
+
+        requestLogger.info('http.request.completed', 'HTTP request completed', {
+          requestId: request.id,
+          method: request.method,
+          url: sanitizeLoggedUrl(request.url),
+          statusCode: reply.statusCode,
+          remoteAddress: request.ip,
+          ...(durationMs === undefined
+            ? {}
+            : {
+                durationMs: Math.round(durationMs * 1000) / 1000,
+              }),
+        });
+
+        requestStartTimes.delete(request.raw);
+      });
+    }
   }
 
   await app.register(websocket);
@@ -418,6 +425,37 @@ function registerDashboardRunRoutes(app: FastifyInstance, context: DashboardRunR
     }
   });
 
+  app.delete('/api/sessions/empty', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted session delete routes require PostgreSQL stores.'));
+    }
+
+    return await deleteDashboardEmptySessions(context.traceClient);
+  });
+
+  app.delete<{ Params: { sessionId: string } }>('/api/sessions/:sessionId', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted session delete routes require PostgreSQL stores.'));
+    }
+
+    try {
+      return await deleteDashboardSession(context.traceClient, request.params.sessionId);
+    } catch (error) {
+      if (error instanceof DashboardDeleteConflictError) {
+        return reply.code(409).send(createGatewayHttpError(error.code, error.message, error.details));
+      }
+      throw error;
+    }
+  });
+
   app.get<{
     Params: { rootRunId: string };
     Querystring: Record<string, string | string[] | undefined>;
@@ -435,6 +473,25 @@ function registerDashboardRunRoutes(app: FastifyInstance, context: DashboardRunR
     } catch (error) {
       if (error instanceof DashboardRouteInputError) {
         return reply.code(400).send(createGatewayHttpError('invalid_frame', error.message));
+      }
+      throw error;
+    }
+  });
+
+  app.delete<{ Params: { rootRunId: string } }>('/api/runs/:rootRunId', async (request, reply) => {
+    const authContext = await requireGatewayAdminHttpRequest(request, reply, context.auth);
+    if (!authContext) {
+      return reply;
+    }
+    if (!context.traceClient) {
+      return reply.code(503).send(createGatewayHttpError('trace_store_unavailable', 'Persisted run delete routes require PostgreSQL runtime stores.'));
+    }
+
+    try {
+      return await deleteDashboardSessionlessRun(context.traceClient, request.params.rootRunId);
+    } catch (error) {
+      if (error instanceof DashboardDeleteConflictError) {
+        return reply.code(409).send(createGatewayHttpError(error.code, error.message, error.details));
       }
       throw error;
     }

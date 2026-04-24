@@ -37,6 +37,7 @@ export interface AgentDefaults {
   capture?: CaptureMode;
   toolBudgets?: Record<string, ToolBudget>;
   researchPolicy?: ResearchPolicyName | ResearchPolicy;
+  injectToolManifest?: boolean;
 }
 
 export interface ToolBudget {

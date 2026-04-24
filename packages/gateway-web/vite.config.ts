@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import { existsSync } from 'node:fs';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -65,8 +66,44 @@ function gatewayDevApi(): Plugin {
           }
         });
       });
+
+      server.middlewares.use(async (request, response, next) => {
+        if (!request.url?.startsWith('/api/runs')) {
+          next();
+          return;
+        }
+
+        await proxyGatewayDashboardRequest(request, response);
+      });
     },
   };
+}
+
+async function proxyGatewayDashboardRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  try {
+    const connection = await loadLocalGatewayConnectionConfig();
+    const host = normalizeHost(connection?.host);
+    const port = connection?.port ?? 8959;
+    const target = new URL(request.url ?? '/api/runs', `http://${host}:${port}`);
+    const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await readRequestBody(request);
+    const upstream = await fetch(target, {
+      method: request.method,
+      headers: copyProxyHeaders(request.headers),
+      body,
+    });
+
+    response.statusCode = upstream.status;
+    upstream.headers.forEach((value, key) => {
+      response.setHeader(key, value);
+    });
+    response.end(Buffer.from(await upstream.arrayBuffer()));
+  } catch (error) {
+    sendJson(response, 502, {
+      type: 'error',
+      code: 'gateway_dashboard_unreachable',
+      message: `Could not proxy dashboard request to the local gateway: ${errorMessage(error)}`,
+    });
+  }
 }
 
 async function loadLocalGatewayConnectionConfig(): Promise<{ host?: string; port?: number; websocketPath?: string } | undefined> {
@@ -185,6 +222,32 @@ function readAudience(value: unknown): string | string[] | undefined {
 
   const audience = readStringArray(value);
   return audience.length > 0 ? audience : undefined;
+}
+
+function copyProxyHeaders(headers: IncomingMessage['headers']): Headers {
+  const proxyHeaders = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (!value || key.toLowerCase() === 'host') {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        proxyHeaders.append(key, entry);
+      }
+    } else {
+      proxyHeaders.set(key, value);
+    }
+  }
+  return proxyHeaders;
+}
+
+function readRequestBody(request: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on('end', () => resolve(Buffer.concat(chunks)));
+    request.on('error', reject);
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

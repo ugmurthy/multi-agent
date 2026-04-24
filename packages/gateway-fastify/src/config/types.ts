@@ -49,6 +49,7 @@ export interface GatewayServerConfig {
   port: number;
   websocketPath: string;
   healthPath?: string;
+  requestLogger?: boolean;
   requestLogging?: boolean | GatewayRequestLogLevel;
   requestLoggingDestination?: GatewayRequestLoggingDestination;
 }

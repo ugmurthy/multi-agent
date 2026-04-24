@@ -194,7 +194,12 @@ export class AdaptiveAgent {
   }
 
   async chat(request: ChatRequest): Promise<ChatResult> {
-    const initialMessages = buildInitialChatMessages(request.messages, request.context, this.options.systemInstructions);
+    const initialMessages = buildInitialChatMessages(
+      request.messages,
+      request.context,
+      this.options.systemInstructions,
+      this.buildRuntimeToolManifestMessage(),
+    );
     const goal = summarizeChatGoal(request.messages);
     const { run: createdRun } = await this.createRunWithInitialSnapshot({
       goal,
@@ -1589,13 +1594,18 @@ export class AdaptiveAgent {
       this.logInjectedSystemMessage(run, 'initial_prompt', initialPrompt.content, 'messages', run.currentStepId);
     }
 
-    const additionalContext = state.messages[1];
-    if (
-      additionalContext?.role === 'system' &&
-      typeof additionalContext.content === 'string' &&
-      additionalContext.content.startsWith('## Additional Context\n\n')
-    ) {
-      this.logInjectedSystemMessage(run, 'chat_context', additionalContext.content, 'messages', run.currentStepId);
+    for (const message of state.messages.slice(1)) {
+      if (message.role !== 'system' || typeof message.content !== 'string') {
+        continue;
+      }
+
+      if (message.content.startsWith('## Available Tools and Delegates\n\n')) {
+        this.logInjectedSystemMessage(run, 'tool_manifest', message.content, 'messages', run.currentStepId);
+      }
+
+      if (message.content.startsWith('## Additional Context\n\n')) {
+        this.logInjectedSystemMessage(run, 'chat_context', message.content, 'messages', run.currentStepId);
+      }
     }
   }
 
@@ -1687,7 +1697,18 @@ export class AdaptiveAgent {
   }
 
   private createInitialExecutionState(run: AgentRun, outputSchema?: JsonSchema): ExecutionState {
-    return this.createExecutionState(buildInitialMessages(run, outputSchema, this.options.systemInstructions), outputSchema);
+    return this.createExecutionState(
+      buildInitialMessages(run, outputSchema, this.options.systemInstructions, this.buildRuntimeToolManifestMessage()),
+      outputSchema,
+    );
+  }
+
+  private buildRuntimeToolManifestMessage(): ModelMessage | undefined {
+    if (this.options.defaults?.injectToolManifest === false) {
+      return undefined;
+    }
+
+    return buildRuntimeToolManifestMessage(Array.from(this.toolRegistry.values()));
   }
 
   private async createRunWithInitialSnapshot(
@@ -2462,7 +2483,7 @@ export class AdaptiveAgent {
 
   private logInjectedSystemMessage(
     run: AgentRun,
-    source: 'initial_prompt' | 'chat_context' | 'research_policy.require_purpose' | 'tool_budget.checkpoint',
+    source: 'initial_prompt' | 'tool_manifest' | 'chat_context' | 'research_policy.require_purpose' | 'tool_budget.checkpoint',
     content: string,
     snapshotField: 'messages' | 'pendingRuntimeMessages',
     stepId?: string,
@@ -2582,7 +2603,37 @@ function buildAgentSystemMessage(systemInstructions?: string): ModelMessage {
   };
 }
 
-function buildInitialMessages(run: AgentRun, outputSchema?: JsonSchema, systemInstructions?: string): ModelMessage[] {
+function buildRuntimeToolManifestMessage(tools: ToolDefinition[]): ModelMessage {
+  const manifest = {
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      kind: tool.name.startsWith(RESERVED_DELEGATE_PREFIX) ? 'delegate' : 'tool',
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+    })),
+  };
+
+  return {
+    role: 'system',
+    content: [
+      '## Available Tools and Delegates',
+      '',
+      'The following callable tools are available to this agent through the model tool interface. Use the exact `name` and provide input that satisfies `inputSchema`. Tools whose `kind` is `delegate` start a child run for that delegate profile.',
+      '',
+      '```json',
+      JSON.stringify(manifest, null, 2),
+      '```',
+    ].join('\n'),
+  };
+}
+
+function buildInitialMessages(
+  run: AgentRun,
+  outputSchema?: JsonSchema,
+  systemInstructions?: string,
+  toolManifestMessage?: ModelMessage,
+): ModelMessage[] {
   const requestPayload: JsonObject = {
     goal: run.goal,
     input: run.input ?? null,
@@ -2595,6 +2646,7 @@ function buildInitialMessages(run: AgentRun, outputSchema?: JsonSchema, systemIn
 
   return [
     buildAgentSystemMessage(systemInstructions),
+    ...(toolManifestMessage ? [toolManifestMessage] : []),
     {
       role: 'user',
       content: JSON.stringify(requestPayload, null, 2),
@@ -2606,6 +2658,7 @@ function buildInitialChatMessages(
   messages: ChatMessage[],
   context?: Record<string, JsonValue>,
   systemInstructions?: string,
+  toolManifestMessage?: ModelMessage,
 ): ModelMessage[] {
   if (messages.length === 0) {
     throw new Error('chat() requires at least one message');
@@ -2623,6 +2676,7 @@ function buildInitialChatMessages(
 
   return [
     buildAgentSystemMessage(systemInstructions),
+    ...(toolManifestMessage ? [toolManifestMessage] : []),
     ...contextMessage,
     ...messages.map((message) => ({
       role: message.role,

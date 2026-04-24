@@ -36,6 +36,7 @@ describe('gateway config loading', () => {
             port: 3000,
             websocketPath: '/ws',
             healthPath: '/health',
+            requestLogger: true,
             requestLogging: 'warn',
             requestLoggingDestination: 'file',
           },
@@ -118,6 +119,7 @@ describe('gateway config loading', () => {
           tools: ['read_file'],
           delegates: ['researcher'],
           defaults: {
+            injectToolManifest: false,
             researchPolicy: 'standard',
             toolBudgets: {
               'web_research.search': {
@@ -163,6 +165,7 @@ describe('gateway config loading', () => {
         intervalMs: 30_000,
       },
     });
+    expect(loadedGatewayConfig.config.server.requestLogger).toBe(true);
     expect(loadedGatewayConfig.config.server.requestLogging).toBe('warn');
     expect(loadedGatewayConfig.config.server.requestLoggingDestination).toBe('file');
     expect(loadedGatewayConfig.config.stores).toEqual({
@@ -189,6 +192,7 @@ describe('gateway config loading', () => {
         'You are the support manager. Delegate focused research to delegate.researcher and synthesize the final answer yourself.',
       delegates: ['researcher'],
       defaults: {
+        injectToolManifest: false,
         researchPolicy: 'standard',
         toolBudgets: {
           'web_research.search': {
@@ -266,6 +270,46 @@ describe('gateway config loading', () => {
     const loadedGatewayConfig = await loadGatewayConfig({ configPath: gatewayConfigPath });
 
     expect(loadedGatewayConfig.config.server.requestLogging).toBe(true);
+  });
+
+  it('defaults requestLogger to off when omitted', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+          },
+          bindings: [],
+          hooks: {
+            failurePolicy: 'warn',
+            modules: [],
+            onAuthenticate: [],
+            onSessionResolve: [],
+            beforeRoute: [],
+            beforeInboundMessage: [],
+            beforeRunStart: [],
+            afterRunResult: [],
+            onAgentEvent: [],
+            beforeOutboundFrame: [],
+            onDisconnect: [],
+            onError: [],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const loadedGatewayConfig = await loadGatewayConfig({ configPath: gatewayConfigPath });
+
+    expect(loadedGatewayConfig.config.server.requestLogger).toBeUndefined();
   });
 
   it('defaults cron file sync to enabled when the object is present', async () => {

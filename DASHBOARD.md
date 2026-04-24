@@ -209,6 +209,88 @@ interface DashboardPlansResponse {
 }
 ```
 
+## Delete Empty Sessions
+
+```txt
+DELETE /api/sessions/empty
+```
+
+Deletes gateway sessions that have no linked root runs in `gateway_session_run_links`.
+
+Associated gateway transcript rows are deleted. `gateway_cron_runs.session_id` and `gateway_run_admissions.session_id` are cleared because those columns are not FK-cascaded. Runtime records in `agent_runs`, `agent_events`, `run_snapshots`, `plans`, `plan_executions`, and `tool_executions` are not affected because no run link exists.
+
+Response:
+
+```ts
+interface DashboardDeleteEmptySessionsResult {
+  deletedSessions: number;
+  deletedTranscriptMessages: number;
+  clearedCronRuns: number;
+  clearedRunAdmissions: number;
+}
+```
+
+## Delete Session
+
+```txt
+DELETE /api/sessions/:sessionId
+```
+
+Deletes one gateway session by id.
+
+Associated gateway records:
+
+- `gateway_transcript_messages` rows for the session are deleted.
+- `gateway_session_run_links` rows for the session are deleted.
+- `gateway_cron_runs.session_id` is cleared.
+- `gateway_run_admissions.session_id` is cleared.
+
+Runtime run records are intentionally preserved. If the session had linked runs, those runs become sessionless from the dashboard perspective.
+
+The route rejects active sessions with `409 session_active` when the session status is `running` or `awaiting_approval`.
+
+Response:
+
+```ts
+interface DashboardDeleteSessionResult {
+  sessionId: string;
+  deletedSessions: number;
+  deletedTranscriptMessages: number;
+  deletedSessionRunLinks: number;
+  clearedCronRuns: number;
+  clearedRunAdmissions: number;
+}
+```
+
+## Delete Sessionless Run
+
+```txt
+DELETE /api/runs/:rootRunId
+```
+
+Deletes a root run tree only when it is sessionless. The route first verifies that no `gateway_session_run_links` row exists for the requested `rootRunId`.
+
+Associated runtime records:
+
+- child and root rows in `agent_runs` are deleted;
+- `agent_events`, `run_snapshots`, `tool_executions`, and `plan_executions` are deleted by cascade;
+- plans created from runs in the tree are deleted, which also deletes `plan_steps`;
+- `gateway_cron_runs` and `gateway_run_admissions` rows for the root run are deleted.
+
+The route rejects linked root runs with `409 run_linked_to_session`. It also rejects non-terminal run trees with `409 run_not_terminal`; all runs in the tree must be one of `succeeded`, `failed`, `clarification_requested`, `replan_required`, or `cancelled`.
+
+Response:
+
+```ts
+interface DashboardDeleteSessionlessRunResult {
+  rootRunId: string;
+  deletedRuns: number;
+  deletedPlans: number;
+  deletedCronRuns: number;
+  deletedRunAdmissions: number;
+}
+```
+
 ## Resolve Approval
 
 ```txt
@@ -259,6 +341,9 @@ Common dashboard errors:
 | `401` | `auth_required` | Missing authenticated principal. |
 | `403` | `session_forbidden` | Authenticated principal is not an admin. |
 | `409` | `approval_session_unavailable` | Approval cannot be resolved without a linked gateway session. |
+| `409` | `session_active` | Session deletion was requested for a running or approval-blocked session. |
+| `409` | `run_linked_to_session` | Sessionless run deletion was requested for a root run linked to a gateway session. |
+| `409` | `run_not_terminal` | Sessionless run deletion was requested for a root run tree with non-terminal runs. |
 | `503` | `trace_store_unavailable` | Gateway is not using PostgreSQL runtime stores for trace data. |
 | `503` | `agent_registry_unavailable` | Approval resolution was requested but no agent registry is available. |
 

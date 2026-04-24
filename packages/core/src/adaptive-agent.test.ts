@@ -124,6 +124,10 @@ describe('AdaptiveAgent', () => {
         },
         {
           role: 'system',
+          content: expect.stringContaining('## Available Tools and Delegates'),
+        },
+        {
+          role: 'system',
           content: expect.stringContaining('"locale": "en-US"'),
         },
         {
@@ -143,6 +147,76 @@ describe('AdaptiveAgent', () => {
 
     const storedRun = await runStore.getRun(result.runId);
     expect(storedRun?.goal).toBe('What is the capital of France?');
+  });
+
+  it('injects a runtime tool manifest after the initial system message by default', async () => {
+    const runStore = new InMemoryRunStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'stop',
+        text: 'Done.',
+      },
+    ]);
+
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createLookupTool()],
+      delegates: [
+        {
+          name: 'researcher',
+          description: 'Researches a topic.',
+          allowedTools: ['lookup'],
+        },
+      ],
+      runStore,
+    });
+
+    const result = await agent.run({ goal: 'Inspect runtime manifest' });
+    expect(result.status).toBe('success');
+
+    const messages = model.receivedRequests[0]?.messages ?? [];
+    expect(messages[0]).toMatchObject({
+      role: 'system',
+      content: expect.stringContaining('You are AdaptiveAgent.'),
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'system',
+      content: expect.stringContaining('## Available Tools and Delegates'),
+    });
+    expect(messages[1]?.content).toContain('"name": "lookup"');
+    expect(messages[1]?.content).toContain('"kind": "tool"');
+    expect(messages[1]?.content).toContain('"name": "delegate.researcher"');
+    expect(messages[1]?.content).toContain('"kind": "delegate"');
+    expect(messages[2]).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('Inspect runtime manifest'),
+    });
+  });
+
+  it('can disable the runtime tool manifest through agent defaults', async () => {
+    const runStore = new InMemoryRunStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'stop',
+        text: 'Done.',
+      },
+    ]);
+
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createLookupTool()],
+      runStore,
+      defaults: {
+        injectToolManifest: false,
+      },
+    });
+
+    const result = await agent.run({ goal: 'Skip manifest' });
+    expect(result.status).toBe('success');
+    expect(model.receivedRequests[0]?.messages).toHaveLength(2);
+    expect(
+      model.receivedRequests[0]?.messages.some((message) => message.content.includes('## Available Tools and Delegates')),
+    ).toBe(false);
   });
 
   it('persists provider and model on newly created runs', async () => {
