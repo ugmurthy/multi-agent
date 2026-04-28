@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Socket } from 'node:net';
 
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import websocket from '@fastify/websocket';
@@ -96,6 +97,7 @@ export async function createGatewayServer(
 ): Promise<FastifyInstance> {
   const app = Fastify(options.fastify);
   const stores = options.stores ?? createInMemoryGatewayStores();
+  const activeWebSocketConnections = new Set<Socket>();
   const requestLogLevel = resolveGatewayRequestLogLevel(config.server.requestLogging);
   const requestLogger = options.requestLogger
     ?? (requestLogLevel
@@ -150,6 +152,10 @@ export async function createGatewayServer(
     }
   }
 
+  app.addHook('onClose', async () => {
+    await closeActiveWebSocketConnections(activeWebSocketConnections);
+  });
+
   await app.register(websocket);
 
   app.get<{ Querystring: GatewayUpgradeQuery }>(
@@ -203,9 +209,16 @@ export async function createGatewayServer(
       },
     },
     (socket, request) => {
+      const connection = request.raw.socket;
       const channelManager = createChannelSubscriptionManager();
       const runtimeObserverUnsubscribers: Array<() => Promise<void>> = [];
       const runtimeObserverRootRunIds = new Set<string>();
+      const unregisterConnection = () => {
+        connection.off('close', unregisterConnection);
+        activeWebSocketConnections.delete(connection);
+      };
+      activeWebSocketConnections.add(connection);
+      connection.once('close', unregisterConnection);
       const rawSendFrame = (frame: OutboundFrame, source: 'response' | 'realtime') => {
         if (requestLogger) {
           requestLogger.info('ws.frame.sent', 'WebSocket frame sent', {
@@ -277,6 +290,7 @@ export async function createGatewayServer(
       };
 
       socket.on('close', () => {
+        unregisterConnection();
         for (const unsubscribe of runtimeObserverUnsubscribers.splice(0)) {
           void unsubscribe().catch(() => undefined);
         }
@@ -386,6 +400,47 @@ export async function createGatewayServer(
   app.get('/status', statusHandler);
 
   return app;
+}
+
+async function closeActiveWebSocketConnections(connections: ReadonlySet<Socket>): Promise<void> {
+  if (connections.size === 0) {
+    return;
+  }
+
+  await Promise.allSettled(Array.from(connections, (connection) => closeActiveWebSocketConnection(connection)));
+}
+
+async function closeActiveWebSocketConnection(connection: Socket): Promise<void> {
+  if (connection.destroyed) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      connection.off('close', finish);
+      resolve();
+    };
+
+    connection.once('close', finish);
+    connection.end();
+    timeoutId = setTimeout(() => {
+      if (!connection.destroyed) {
+        connection.destroy();
+      }
+      finish();
+    }, 250);
+  });
 }
 
 interface DashboardRunRouteContext {

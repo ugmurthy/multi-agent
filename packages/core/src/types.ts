@@ -49,6 +49,9 @@ export type EventType =
   | 'plan.execution_started'
   | 'step.started'
   | 'step.completed'
+  | 'model.started'
+  | 'model.completed'
+  | 'model.failed'
   | 'tool.started'
   | 'tool.completed'
   | 'tool.failed'
@@ -75,7 +78,30 @@ export interface ModelCapabilities {
   jsonOutput: boolean;
   streaming: boolean;
   usage: boolean;
+  imageInput?: boolean;
 }
+
+export type ImageDetail = 'auto' | 'low' | 'high';
+
+export interface ImageInput {
+  path: string;
+  mimeType?: string;
+  detail?: ImageDetail;
+  name?: string;
+}
+
+export interface ModelTextContentPart {
+  type: 'text';
+  text: string;
+}
+
+export interface ModelImageContentPart {
+  type: 'image';
+  image: ImageInput;
+}
+
+export type ModelContentPart = ModelTextContentPart | ModelImageContentPart;
+export type ModelMessageContent = string | ModelContentPart[];
 
 export interface AgentDefaults {
   maxSteps?: number;
@@ -118,6 +144,7 @@ export interface DelegationPolicy {
 export interface RunRequest {
   goal: string;
   input?: JsonValue;
+  images?: ImageInput[];
   context?: Record<string, JsonValue>;
   allowedTools?: string[];
   forbiddenTools?: string[];
@@ -128,6 +155,7 @@ export interface RunRequest {
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  images?: ImageInput[];
 }
 
 export interface ChatRequest {
@@ -190,6 +218,7 @@ export interface DelegateDefinition {
 export interface DelegateToolInput {
   goal: string;
   input?: JsonValue;
+  images?: ImageInput[];
   context?: Record<string, JsonValue>;
   outputSchema?: JsonSchema;
   metadata?: Record<string, JsonValue>;
@@ -260,10 +289,12 @@ export interface ToolDefinition<I extends JsonValue = JsonValue, O extends JsonV
 
 export interface ModelMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: ModelMessageContent;
   name?: string;
   toolCallId?: string;
   toolCalls?: ModelToolCall[];
+  reasoning?: string;
+  reasoningDetails?: JsonValue[];
 }
 
 export interface ModelToolCall {
@@ -288,6 +319,8 @@ export interface ModelResponse {
   usage?: UsageSummary;
   providerResponseId?: string;
   summary?: string;
+  reasoning?: string;
+  reasoningDetails?: JsonValue[];
 }
 
 export interface ModelStreamEvent {

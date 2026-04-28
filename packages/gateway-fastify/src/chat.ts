@@ -107,7 +107,7 @@ export async function executeGatewayChatTurn(
         : undefined,
       () =>
         agent.agent.chat({
-          messages: [...replayEnvelope, { role: 'user', content: effectiveFrame.content }],
+          messages: [...replayEnvelope, { role: 'user', content: effectiveFrame.content, images: effectiveFrame.images }],
           context: buildGatewayChatContext(runningSession, options.authContext),
           metadata: buildGatewayChatMetadata(effectiveFrame, route.agentId, options.realtimeEvents?.requestId),
         }),

@@ -2,6 +2,31 @@ import type { AgentEventFrame } from './protocol.js';
 
 const MAX_TOOL_DETAIL_LENGTH = 110;
 
+const ASSISTANT_CONTENT_GATING_EVENT_TYPES = new Set([
+  'tool.started',
+  'approval.requested',
+  'delegate.spawned',
+]);
+
+/**
+ * Returns the trimmed `assistantContent` carried by the agent event when it
+ * represents a model turn that produced text immediately before invoking a
+ * tool, requesting approval, or spawning a delegate. Returns `undefined` for
+ * other event types or when no assistant content is present.
+ */
+export function extractAssistantContentForEvent(frame: AgentEventFrame): string | undefined {
+  if (!ASSISTANT_CONTENT_GATING_EVENT_TYPES.has(frame.eventType)) {
+    return undefined;
+  }
+  const payload = asRecord(frame.data);
+  const content = readString(payload, 'assistantContent');
+  if (!content) {
+    return undefined;
+  }
+  const trimmed = content.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function formatCompactAgentEventFrame(
   frame: AgentEventFrame,
   options: { includeSeq?: boolean; prefixStyle?: 'time-seq' | 'seq' } = {},
@@ -47,6 +72,34 @@ export function formatCompactAgentEventFrame(
       return `${prefix} step ${frame.stepId ?? readString(payload, 'stepId') ?? 'unknown'} started`;
     case 'step.completed':
       return `${prefix} step ${frame.stepId ?? readString(payload, 'stepId') ?? 'unknown'} completed`;
+    case 'model.started': {
+      const provider = readString(payload, 'provider');
+      const model = readString(payload, 'model');
+      const timeoutMs = readNumber(payload, 'modelTimeoutMs');
+      const target = [provider, model].filter((part): part is string => Boolean(part)).join('/');
+      const timeoutPart = timeoutMs !== undefined ? ` (timeout ${formatDurationMs(timeoutMs)})` : '';
+      return `${prefix} model thinking${target ? ` ${target}` : ''}${timeoutPart}`;
+    }
+    case 'model.completed': {
+      const durationMs = readNumber(payload, 'durationMs');
+      const finishReason = readString(payload, 'finishReason');
+      const toolCallCount = readNumber(payload, 'toolCallCount');
+      const parts: string[] = [];
+      if (durationMs !== undefined) parts.push(formatDurationMs(durationMs));
+      if (finishReason) parts.push(`finish=${finishReason}`);
+      if (toolCallCount !== undefined && toolCallCount > 0) parts.push(`toolCalls=${toolCallCount}`);
+      return `${prefix} model completed${parts.length > 0 ? ` (${parts.join(', ')})` : ''}`;
+    }
+    case 'model.failed': {
+      const durationMs = readNumber(payload, 'durationMs');
+      const timedOut = payload.timedOut === true;
+      const error = readFailureText(payload);
+      const parts: string[] = [];
+      if (durationMs !== undefined) parts.push(formatDurationMs(durationMs));
+      if (timedOut) parts.push('timed out');
+      const detail = error ? `: ${truncate(oneLine(error), MAX_TOOL_DETAIL_LENGTH)}` : '';
+      return `${prefix} model failed${parts.length > 0 ? ` (${parts.join(', ')})` : ''}${detail}`;
+    }
     case 'tool.started':
       return formatToolLifecycle(prefix, payload, 'started');
     case 'tool.completed':
@@ -295,6 +348,22 @@ function readFailureText(record: Record<string, unknown>): string | undefined {
 
 function shortRunId(runId: string): string {
   return `run:${runId.slice(0, 8)}`;
+}
+
+export function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return `${ms}ms`;
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`;
+  }
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return remainingSeconds === 0 ? `${minutes}m` : `${minutes}m${remainingSeconds}s`;
 }
 
 function formatEventTime(value: string): string {

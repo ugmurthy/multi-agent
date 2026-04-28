@@ -6,7 +6,9 @@ import { marked } from 'marked';
 import { GatewayWebClient, loadGatewayDefaults } from '../../gateway/client';
 import {
   formatClockTime,
+  formatLiveProgressUpdate,
   formatRunOutput,
+  formatToolProgressDetail,
   isClarificationRequestOutput,
   shortId,
   summarizeAgentEvent,
@@ -16,6 +18,7 @@ import type {
   FeedEntry,
   GatewayDefaults,
   GatewayIdentity,
+  GatewayImageInput,
   LiveAgentEventSummary,
   LiveGatewayState,
   PendingApproval,
@@ -83,6 +86,9 @@ export function ComposerPage(): ReactElement {
   const [showConnect, setShowConnect] = useState(false);
   const [composerMode, setComposerMode] = useState<ComposerMode>('run');
   const [composerText, setComposerText] = useState('');
+  const [composerImagePath, setComposerImagePath] = useState('');
+  const [composerImageDetail, setComposerImageDetail] = useState<GatewayImageInput['detail']>('high');
+  const [isComposerCollapsed, setIsComposerCollapsed] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState('');
   const [settingsNotice, setSettingsNotice] = useState('');
@@ -229,6 +235,8 @@ export function ComposerPage(): ReactElement {
   async function submitComposer(event: FormEvent): Promise<void> {
     event.preventDefault();
     const text = composerText.trim();
+    const imagePath = composerImagePath.trim();
+    const images: GatewayImageInput[] | undefined = imagePath.length > 0 ? [{ path: imagePath, detail: composerImageDetail }] : undefined;
     if (!text) {
       return;
     }
@@ -239,13 +247,15 @@ export function ComposerPage(): ReactElement {
 
     try {
       if (composerMode === 'chat') {
-        await clientRef.current.sendChat(text);
-        addFeed('user', text);
+        await clientRef.current.sendChat(text, images);
+        addFeed('user', describeComposerSubmission(text, images));
       } else {
-        await clientRef.current.startRun(text);
-        addFeed('user', `Run: ${text}`);
+        await clientRef.current.startRun(text, images);
+        addFeed('user', `Run: ${describeComposerSubmission(text, images)}`);
       }
       setComposerText('');
+      setComposerImagePath('');
+      setComposerImageDetail('high');
     } catch (sendError) {
       addFeed('system', `Send failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
     }
@@ -392,110 +402,142 @@ export function ComposerPage(): ReactElement {
                     <SettingsIcon />
                   </button>
                 </div>
+                <button
+                  className={`minimal-composer-collapse-toggle ${isComposerCollapsed ? 'collapsed' : ''}`}
+                  type="button"
+                  aria-label={isComposerCollapsed ? 'Expand composer' : 'Collapse composer'}
+                  aria-expanded={!isComposerCollapsed}
+                  title={isComposerCollapsed ? 'Expand composer' : 'Collapse composer'}
+                  onClick={() => setIsComposerCollapsed((value) => !value)}
+                />
                 <span className="minimal-runtime-chip">{buildRuntimeLabel(activeRun, state.session.status, clockTick)}</span>
               </div>
 
-              {showConnect ? (
-                <section className="minimal-settings-sheet" aria-label="Connection settings">
-                  <div className="minimal-settings-head">
-                    <div className="minimal-settings-copy">
-                      <p className="eyebrow">Connection settings</p>
-                      <h2>Gateway session defaults</h2>
+              <div className={`minimal-composer-body ${isComposerCollapsed ? 'collapsed' : ''}`}>
+                {showConnect ? (
+                  <section className="minimal-settings-sheet" aria-label="Connection settings">
+                    <div className="minimal-settings-head">
+                      <div className="minimal-settings-copy">
+                        <p className="eyebrow">Connection settings</p>
+                        <h2>Gateway session defaults</h2>
+                      </div>
+                      <div className="minimal-settings-actions">
+                        <button
+                          className="minimal-settings-icon-button"
+                          type="button"
+                          aria-label="Reset connection settings to defaults"
+                          title="Reset connection settings to defaults"
+                          onClick={resetConnectionSettingsForm}
+                        >
+                          <ResetIcon />
+                        </button>
+                        <button
+                          className="minimal-settings-icon-button primary"
+                          type="button"
+                          aria-label="Save connection settings"
+                          title="Save connection settings"
+                          onClick={saveCurrentConnectionSettings}
+                        >
+                          <SaveIcon />
+                        </button>
+                      </div>
                     </div>
-                    <div className="minimal-settings-actions">
-                      <button
-                        className="minimal-settings-icon-button"
-                        type="button"
-                        aria-label="Reset connection settings to defaults"
-                        title="Reset connection settings to defaults"
-                        onClick={resetConnectionSettingsForm}
-                      >
-                        <ResetIcon />
-                      </button>
-                      <button
-                        className="minimal-settings-icon-button primary"
-                        type="button"
-                        aria-label="Save connection settings"
-                        title="Save connection settings"
-                        onClick={saveCurrentConnectionSettings}
-                      >
-                        <SaveIcon />
-                      </button>
-                    </div>
-                  </div>
 
-                  <div className="minimal-settings-fields">
-                    <label>
-                      Gateway socket
-                      <input value={socketUrl} onChange={(event) => setSocketUrl(event.target.value)} />
-                    </label>
-                    <label>
-                      Channel
-                      <input value={identity.channel} onChange={(event) => setIdentity({ ...identity, channel: event.target.value })} />
-                    </label>
-                    <label>
-                      Subject
-                      <input value={identity.subject} onChange={(event) => setIdentity({ ...identity, subject: event.target.value })} />
-                    </label>
-                    <label>
-                      Tenant
-                      <input value={identity.tenantId} onChange={(event) => setIdentity({ ...identity, tenantId: event.target.value })} />
-                    </label>
-                    <label>
-                      Roles
+                    <div className="minimal-settings-fields">
+                      <label>
+                        Gateway socket
+                        <input value={socketUrl} onChange={(event) => setSocketUrl(event.target.value)} />
+                      </label>
+                      <label>
+                        Channel
+                        <input value={identity.channel} onChange={(event) => setIdentity({ ...identity, channel: event.target.value })} />
+                      </label>
+                      <label>
+                        Subject
+                        <input value={identity.subject} onChange={(event) => setIdentity({ ...identity, subject: event.target.value })} />
+                      </label>
+                      <label>
+                        Tenant
+                        <input value={identity.tenantId} onChange={(event) => setIdentity({ ...identity, tenantId: event.target.value })} />
+                      </label>
+                      <label>
+                        Roles
+                        <input
+                          value={identity.roles.join(', ')}
+                          onChange={(event) => setIdentity({ ...identity, roles: parseRoles(event.target.value) })}
+                        />
+                      </label>
+                      <label className="minimal-settings-toggle">
+                        Use local dev token
+                        <span>
+                          <input type="checkbox" checked={useDevToken} onChange={(event) => setUseDevToken(event.target.checked)} />
+                          <span>{useDevToken ? 'Enabled' : 'Disabled'}</span>
+                        </span>
+                      </label>
+                      {!useDevToken ? (
+                        <label>
+                          JWT
+                          <textarea value={customToken} onChange={(event) => setCustomToken(event.target.value)} rows={3} />
+                        </label>
+                      ) : null}
+                    </div>
+
+                    {settingsNotice ? <p className="minimal-settings-note">{settingsNotice}</p> : null}
+                    {error ? <p className="minimal-settings-error">{error}</p> : null}
+                  </section>
+                ) : null}
+
+                <form className="minimal-composer" onSubmit={(event) => void submitMinimalComposer(event)}>
+                  {progressIndicator ? (
+                    <div
+                      className={`minimal-progress-lane ${progressIndicator.kind}`}
+                      aria-live="polite"
+                      aria-label={progressIndicator.label}
+                      title={progressIndicator.label}
+                    >
+                      <span className="minimal-progress-chip">
+                        {progressIndicator.kind === 'delegate' ? (
+                          <span className="minimal-progress-dot" aria-hidden="true" />
+                        ) : (
+                          <span className="minimal-progress-spinner" aria-hidden="true" />
+                        )}
+                        <span>{progressIndicator.label}</span>
+                      </span>
+                    </div>
+                  ) : null}
+                  <textarea
+                    value={composerText}
+                    onChange={(event) => setComposerText(event.target.value)}
+                    placeholder={composerPlaceholder}
+                    rows={4}
+                  />
+                  <div className="minimal-composer-attachments">
+                    <label className="minimal-composer-file-field">
+                      <span>Image path</span>
                       <input
-                        value={identity.roles.join(', ')}
-                        onChange={(event) => setIdentity({ ...identity, roles: parseRoles(event.target.value) })}
+                        type="text"
+                        value={composerImagePath}
+                        onChange={(event) => setComposerImagePath(event.target.value)}
+                        placeholder="/Users/me/receipt.png"
                       />
                     </label>
-                    <label className="minimal-settings-toggle">
-                      Use local dev token
-                      <span>
-                        <input type="checkbox" checked={useDevToken} onChange={(event) => setUseDevToken(event.target.checked)} />
-                        <span>{useDevToken ? 'Enabled' : 'Disabled'}</span>
-                      </span>
+                    <label className="minimal-composer-detail-field">
+                      <span>Detail</span>
+                      <select
+                        value={composerImageDetail ?? 'high'}
+                        onChange={(event) => setComposerImageDetail(event.target.value as GatewayImageInput['detail'])}
+                      >
+                        <option value="high">high</option>
+                        <option value="auto">auto</option>
+                        <option value="low">low</option>
+                      </select>
                     </label>
-                    {!useDevToken ? (
-                      <label>
-                        JWT
-                        <textarea value={customToken} onChange={(event) => setCustomToken(event.target.value)} rows={3} />
-                      </label>
-                    ) : null}
                   </div>
-
-                  {settingsNotice ? <p className="minimal-settings-note">{settingsNotice}</p> : null}
-                  {error ? <p className="minimal-settings-error">{error}</p> : null}
-                </section>
-              ) : null}
-
-              <form className="minimal-composer" onSubmit={(event) => void submitMinimalComposer(event)}>
-                {progressIndicator ? (
-                  <div
-                    className={`minimal-progress-lane ${progressIndicator.kind}`}
-                    aria-live="polite"
-                    aria-label={progressIndicator.label}
-                    title={progressIndicator.label}
-                  >
-                    <span className="minimal-progress-chip">
-                      {progressIndicator.kind === 'delegate' ? (
-                        <span className="minimal-progress-dot" aria-hidden="true" />
-                      ) : (
-                        <span className="minimal-progress-spinner" aria-hidden="true" />
-                      )}
-                      <span>{progressIndicator.label}</span>
-                    </span>
-                  </div>
-                ) : null}
-                <textarea
-                  value={composerText}
-                  onChange={(event) => setComposerText(event.target.value)}
-                  placeholder={composerPlaceholder}
-                  rows={4}
-                />
-                <button className="minimal-send-button" type="submit" aria-label={composerActionLabel} title={composerActionLabel}>
-                  <SendIcon />
-                </button>
-              </form>
+                  <button className="minimal-send-button" type="submit" aria-label={composerActionLabel} title={composerActionLabel}>
+                    <SendIcon />
+                  </button>
+                </form>
+              </div>
 
               {pendingApproval ? (
                 <div className="minimal-status-bar pending">
@@ -686,16 +728,27 @@ function applyFrame(state: LiveGatewayState, frame: OutboundFrame): LiveGatewayS
       }, 'system', `Approval requested${frame.toolName ? ` for ${frame.toolName}` : ''}.`, frame.runId);
     case 'agent.event': {
       const summary = summarizeAgentEvent(frame);
-      return {
+      const eventRunId = frame.runId ?? frame.rootRunId ?? 'unknown';
+      const existingRun = state.runs.find((run) => run.runId === eventRunId);
+      const existingSettled = existingRun?.status === 'succeeded' || existingRun?.status === 'failed';
+      const nextStatus = existingSettled ? existingRun!.status : inferRunStatus(summary, state.session.status);
+      const nextState = {
         ...state,
         events: [summary, ...state.events].slice(0, 250),
         runs: upsertRun(state.runs, {
-          runId: frame.runId ?? frame.rootRunId ?? 'unknown',
+          runId: eventRunId,
           rootRunId: frame.rootRunId,
-          status: inferRunStatus(summary, state.session.status),
+          status: nextStatus,
           latestEvent: summary,
         }),
       };
+
+      const progressMessage = formatLiveProgressUpdate(frame);
+      if (!progressMessage) {
+        return nextState;
+      }
+
+      return appendFeed(nextState, 'assistant', formatProgressFeedEntry(summary, progressMessage), frame.runId ?? frame.rootRunId);
     }
     case 'error':
       return appendFeed(state, 'system', `error[${frame.code}]: ${frame.message}`);
@@ -720,6 +773,19 @@ function appendFeed(state: LiveGatewayState, kind: FeedEntry['kind'], content: s
       },
     ],
   };
+}
+
+function formatProgressFeedEntry(summary: LiveAgentEventSummary, progressMessage: string): string {
+  const assistantContent = summary.assistantContent?.trim();
+  if (!assistantContent || !shouldShowAssistantContentWithProgress(summary.eventType)) {
+    return progressMessage;
+  }
+
+  return `${assistantContent}\n\n${progressMessage}`;
+}
+
+function shouldShowAssistantContentWithProgress(eventType: string): boolean {
+  return eventType === 'tool.started' || eventType === 'approval.requested' || eventType === 'delegate.spawned';
 }
 
 function upsertRun(runs: RunActivity[], patch: Partial<RunActivity> & { runId: string }): RunActivity[] {
@@ -1058,9 +1124,12 @@ function resolveMinimalProgressIndicator(
 
   if (isDelegateToolInProgress(latestEvent)) {
     const delegateName = latestEvent.toolName?.replace(/^delegate\./, '');
+    const detail = latestEvent.toolName ? formatToolProgressDetail(latestEvent.toolName, latestEvent.input) : undefined;
     return {
       kind: 'delegate',
-      label: delegateName ? `Delegating to ${delegateName}` : 'Delegate tool in progress',
+      label: delegateName
+        ? `Delegating to ${delegateName}${detail ? ` ${detail}` : ''}`
+        : 'Delegate tool in progress',
     };
   }
 
@@ -1069,7 +1138,8 @@ function resolveMinimalProgressIndicator(
   }
 
   if (latestEvent.toolName) {
-    return { kind: 'step', label: `Running ${latestEvent.toolName}` };
+    const detail = formatToolProgressDetail(latestEvent.toolName, latestEvent.input);
+    return { kind: 'step', label: `Running ${latestEvent.toolName}${detail ? ` ${detail}` : ''}` };
   }
 
   if (latestEvent.eventType === 'run.retry_started') {
@@ -1096,10 +1166,26 @@ function buildRuntimeLabel(run: RunActivity | undefined, sessionStatus: SessionS
     return `session ${sessionStatus}`;
   }
 
-  const active = run.status === 'running' || run.status === 'awaiting_approval' || sessionStatus === 'running' || sessionStatus === 'awaiting_approval';
+  const settled = run.status === 'succeeded' || run.status === 'failed';
+  const active =
+    !settled &&
+    (run.status === 'running' ||
+      run.status === 'awaiting_approval' ||
+      sessionStatus === 'running' ||
+      sessionStatus === 'awaiting_approval');
   const end = active ? now : run.updatedAt.getTime();
   const label = active ? 'working' : run.status;
   return `${label} ${formatElapsedClock(end - run.startedAt.getTime())}`;
+}
+
+function describeComposerSubmission(text: string, images?: GatewayImageInput[]): string {
+  const image = images?.[0];
+  if (!image) {
+    return text;
+  }
+
+  const detail = image.detail ?? 'auto';
+  return `${text}\n[image: ${image.path} (${detail})]`;
 }
 
 function formatElapsedClock(ms: number): string {

@@ -1,4 +1,4 @@
-import type { AgentRun, ModelMessage, ModelRequest, ModelResponse, RunResult, ToolDefinition } from './types.js';
+import type { AgentRun, ModelContentPart, ModelMessage, ModelRequest, ModelResponse, RunResult, ToolDefinition } from './types.js';
 
 import { captureValueForLog, summarizeValueForLog } from './logger.js';
 
@@ -83,11 +83,38 @@ function summarizeModelMessageForLog(message: ModelMessage) {
     role: message.role,
     name: message.name,
     toolCallId: message.toolCallId,
-    content: summarizeValueForLog(message.content),
+    content: summarizeModelMessageContentForLog(message.content),
     toolCalls: message.toolCalls?.map((toolCall) => ({
       id: toolCall.id,
       name: toolCall.name,
       input: summarizeValueForLog(toolCall.input),
     })),
+  };
+}
+
+function summarizeModelMessageContentForLog(content: ModelMessage['content']) {
+  if (typeof content === 'string') {
+    return summarizeValueForLog(content);
+  }
+
+  return content.map((part) => summarizeModelContentPartForLog(part));
+}
+
+function summarizeModelContentPartForLog(part: ModelContentPart) {
+  if (part.type === 'text') {
+    return {
+      type: part.type,
+      text: summarizeValueForLog(part.text),
+    };
+  }
+
+  return {
+    type: part.type,
+    image: {
+      path: part.image.path,
+      mimeType: part.image.mimeType,
+      detail: part.image.detail,
+      name: part.image.name,
+    },
   };
 }

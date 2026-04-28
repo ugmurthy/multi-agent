@@ -825,6 +825,7 @@ async function executeResolvedGatewayRun(
       agent.agent.run!({
         goal: frame.goal,
         input: frame.input,
+        images: frame.images,
         context: buildGatewayRunContext(frame, options.session, options.authContext, options.requestedChannelId),
         metadata: buildGatewayRunMetadata(frame, options.session?.id, options.agentId, options.realtimeEvents?.requestId),
       }),

@@ -839,6 +839,27 @@ describe('createGatewayServer', () => {
     }
   });
 
+  it('closes active websocket connections during shutdown', async () => {
+    const app = await createGatewayServer(baseConfig);
+    await app.listen({ host: '127.0.0.1', port: 0 });
+
+    const socket = await openTestWebSocket(`ws://127.0.0.1:${getListeningPort(app)}/ws`);
+
+    try {
+      const closed = await Promise.race([
+        app.close().then(() => 'closed' as const),
+        new Promise<'timed_out'>((resolve) => setTimeout(() => resolve('timed_out'), 1_000)),
+      ]);
+
+      expect(closed).toBe('closed');
+      await waitForSocketClose(socket);
+    } finally {
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+    }
+  });
+
   it('routes websocket messages through the validated protocol handler', async () => {
     expect(await handleGatewaySocketMessage(JSON.stringify({ type: 'ping', id: 'heartbeat-1' }))).toEqual({
       type: 'pong',
@@ -3475,6 +3496,16 @@ async function waitForSocketMessage(socket: WebSocket): Promise<string> {
 
     socket.addEventListener('message', handleMessage, { once: true });
     socket.addEventListener('error', handleError, { once: true });
+  });
+}
+
+async function waitForSocketClose(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    socket.addEventListener('close', () => resolve(), { once: true });
   });
 }
 

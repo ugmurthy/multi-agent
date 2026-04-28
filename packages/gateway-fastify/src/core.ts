@@ -64,6 +64,15 @@ export interface ModelAdapterConfig {
   siteName?: string;
 }
 
+export type ImageDetail = 'auto' | 'low' | 'high';
+
+export interface ImageInput {
+  path: string;
+  mimeType?: string;
+  detail?: ImageDetail;
+  name?: string;
+}
+
 export interface UsageSummary {
   promptTokens: number;
   completionTokens: number;
@@ -96,6 +105,7 @@ export type FailureKind =
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  images?: ImageInput[];
 }
 
 export interface ChatRequest {
@@ -176,6 +186,7 @@ export interface AdaptiveAgentHandle {
   run?(request: {
     goal: string;
     input?: JsonValue;
+    images?: ImageInput[];
     context?: JsonObject;
     metadata?: JsonObject;
   }): Promise<RunResult>;

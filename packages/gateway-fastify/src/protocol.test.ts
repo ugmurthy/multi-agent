@@ -25,8 +25,36 @@ describe('gateway protocol validation', () => {
       agentId: undefined,
       goal: 'Summarize recent incidents',
       input: { severity: 'high' },
+      images: undefined,
       context: { tenantId: 'acme' },
       metadata: undefined,
+    });
+  });
+
+  it('parses local image inputs on chat and run frames', () => {
+    const chatFrame = parseInboundFrame(
+      JSON.stringify({
+        type: 'message.send',
+        sessionId: 'session-1',
+        content: 'What is in this image?',
+        images: [{ path: '/tmp/receipt.jpg', mimeType: 'image/jpeg', detail: 'high', name: 'receipt' }],
+      }),
+    );
+    const runFrame = parseInboundFrame(
+      JSON.stringify({
+        type: 'run.start',
+        goal: 'Read the receipt total',
+        images: [{ path: '/tmp/receipt.png' }],
+      }),
+    );
+
+    expect(chatFrame).toMatchObject({
+      type: 'message.send',
+      images: [{ path: '/tmp/receipt.jpg', mimeType: 'image/jpeg', detail: 'high', name: 'receipt' }],
+    });
+    expect(runFrame).toMatchObject({
+      type: 'run.start',
+      images: [{ path: '/tmp/receipt.png' }],
     });
   });
 

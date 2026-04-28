@@ -1195,6 +1195,10 @@ function isJsonObject(value: JsonValue): value is JsonObject {
 }
 
 function toDelegateToolInput(input: JsonValue): DelegateToolInput {
+  if (typeof input === 'string') {
+    return { goal: input };
+  }
+
   if (!isJsonObject(input) || typeof input.goal !== 'string') {
     throw new DelegationError('delegate.* tools require a JSON object input with a string goal');
   }

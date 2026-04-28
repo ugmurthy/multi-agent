@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ModelRequest } from '../types.js';
@@ -53,6 +57,46 @@ const TOOL_CALL_RESPONSE = {
     prompt_tokens: 20,
     completion_tokens: 10,
     total_tokens: 30,
+  },
+};
+
+const TOOL_CALL_RESPONSE_WITH_REASONING = {
+  id: 'chatcmpl-test-2b',
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: 'assistant' as const,
+        content: null,
+        reasoning: 'Need to call the lookup tool first.',
+        reasoning_details: [
+          {
+            type: 'reasoning.text',
+            text: 'Need to call the lookup tool first.',
+            format: 'openai-responses-v1',
+          },
+        ],
+        tool_calls: [
+          {
+            id: 'call-1',
+            type: 'function' as const,
+            function: {
+              name: 'lookup',
+              arguments: '{"topic":"testing"}',
+            },
+          },
+        ],
+      },
+      finish_reason: 'tool_calls' as const,
+    },
+  ],
+  usage: {
+    prompt_tokens: 20,
+    completion_tokens: 10,
+    total_tokens: 34,
+    completion_tokens_details: {
+      reasoning_tokens: 4,
+    },
   },
 };
 
@@ -127,6 +171,34 @@ function requestWithAssistantToolCalls(): ModelRequest {
       {
         role: 'assistant',
         content: '',
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: 'lookup',
+            input: { topic: 'testing' },
+          },
+        ],
+      },
+      { role: 'tool', content: '{"result":"found"}', toolCallId: 'call-1', name: 'lookup' },
+    ],
+  };
+}
+
+function requestWithAssistantToolCallsAndReasoning(): ModelRequest {
+  return {
+    messages: [
+      { role: 'user', content: 'Look up testing' },
+      {
+        role: 'assistant',
+        content: '',
+        reasoning: 'Need to call the lookup tool first.',
+        reasoningDetails: [
+          {
+            type: 'reasoning.text',
+            text: 'Need to call the lookup tool first.',
+            format: 'openai-responses-v1',
+          },
+        ],
         toolCalls: [
           {
             id: 'call-1',
@@ -236,6 +308,43 @@ describe('BaseOpenAIChatAdapter', () => {
       id: 'call-1',
       name: 'lookup',
       input: { topic: 'testing' },
+    });
+  });
+
+  it('round-trips reasoning fields for assistant tool call messages', async () => {
+    const adapter = createAdapter();
+    mockFetchResponse(TOOL_CALL_RESPONSE_WITH_REASONING);
+
+    const result = await adapter.generate(requestWithTools());
+
+    expect(result.reasoning).toBe('Need to call the lookup tool first.');
+    expect(result.reasoningDetails).toEqual([
+      {
+        type: 'reasoning.text',
+        text: 'Need to call the lookup tool first.',
+        format: 'openai-responses-v1',
+      },
+    ]);
+    expect(result.usage?.reasoningTokens).toBe(4);
+
+    fetchSpy.mockClear();
+    mockFetchResponse(STOP_RESPONSE);
+
+    await adapter.generate(requestWithAssistantToolCallsAndReasoning());
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const assistantMsg = body.messages.find((m: { role: string }) => m.role === 'assistant');
+    expect(assistantMsg).toMatchObject({
+      role: 'assistant',
+      content: null,
+      reasoning: 'Need to call the lookup tool first.',
+      reasoning_details: [
+        {
+          type: 'reasoning.text',
+          text: 'Need to call the lookup tool first.',
+          format: 'openai-responses-v1',
+        },
+      ],
     });
   });
 
@@ -481,9 +590,7 @@ describe('BaseOpenAIChatAdapter', () => {
     await Promise.resolve();
 
     const secondPromise = secondAdapter.generate(simpleRequest());
-    await Promise.resolve();
-
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
 
     firstResponse.resolve(
       new Response(JSON.stringify(STOP_RESPONSE), {
@@ -561,6 +668,61 @@ describe('BaseOpenAIChatAdapter', () => {
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.tools).toBeUndefined();
+  });
+
+  it('encodes local image content parts as OpenAI image_url data URLs', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'adapter-image-test-'));
+    try {
+      const imagePath = join(tempDir, 'receipt.png');
+      await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const adapter = createAdapter({ capabilities: { imageInput: true } });
+      mockFetchResponse(STOP_RESPONSE);
+
+      await adapter.generate({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Read this receipt.' },
+              { type: 'image', image: { path: imagePath, detail: 'high' } },
+            ],
+          },
+        ],
+      });
+
+      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(body.messages[0].content).toEqual([
+        { type: 'text', text: 'Read this receipt.' },
+        {
+          type: 'image_url',
+          image_url: {
+            url: `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64')}`,
+            detail: 'high',
+          },
+        },
+      ]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects image input when the adapter does not declare image support', async () => {
+    const adapter = createAdapter();
+
+    await expect(
+      adapter.generate({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Read this receipt.' },
+              { type: 'image', image: { path: '/tmp/receipt.png' } },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toThrow('does not declare image input support');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('handles malformed tool arguments gracefully', async () => {

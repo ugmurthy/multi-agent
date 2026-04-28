@@ -289,6 +289,87 @@ describe('bootstrapGateway cron lifecycle', () => {
     expect(logContents).toContain('"event":"http.request.completed"');
   });
 
+  it('waits for async shutdown progress callbacks before close resolves', async () => {
+    const workspace = await createTempWorkspace();
+    tempDirectories.push(workspace);
+
+    const gatewayConfigPath = join(workspace, 'gateway.json');
+    const agentDirectory = join(workspace, 'agents');
+    const agentConfigPath = join(agentDirectory, 'test-agent.json');
+    const progressMessages: string[] = [];
+
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(
+      gatewayConfigPath,
+      JSON.stringify(
+        {
+          server: {
+            host: '127.0.0.1',
+            port: 3000,
+            websocketPath: '/ws',
+          },
+          bindings: [],
+          defaultAgentId: 'test-agent',
+          hooks: {
+            failurePolicy: 'fail',
+            modules: [],
+            onAuthenticate: [],
+            onSessionResolve: [],
+            beforeRoute: [],
+            beforeInboundMessage: [],
+            beforeRunStart: [],
+            afterRunResult: [],
+            onAgentEvent: [],
+            beforeOutboundFrame: [],
+            onDisconnect: [],
+            onError: [],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(
+      agentConfigPath,
+      JSON.stringify(
+        {
+          id: 'test-agent',
+          name: 'Test Agent',
+          invocationModes: ['chat', 'run'],
+          defaultInvocationMode: 'chat',
+          model: {
+            provider: 'openrouter',
+            model: 'test',
+          },
+          tools: [],
+          delegates: [],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const gateway = await bootstrapGateway({
+      gatewayConfigPath,
+      agentConfigDir: agentDirectory,
+      agentFactory: () => createStubAgent(),
+      onShutdownProgress: async (message) => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        progressMessages.push(message);
+      },
+    });
+
+    await gateway.app.listen({ host: '127.0.0.1', port: 0 });
+    await gateway.app.close();
+
+    expect(progressMessages).toEqual([
+      'Draining in-flight background work...',
+      'Flushing runtime logs...',
+      'Closing request logs and persistence stores...',
+      'Gateway shutdown complete.',
+    ]);
+  });
+
   it('keeps HTTP request logging off by default', async () => {
     const workspace = await createTempWorkspace();
     tempDirectories.push(workspace);

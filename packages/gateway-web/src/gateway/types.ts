@@ -4,6 +4,12 @@ export type SocketState = 'idle' | 'connecting' | 'connected' | 'closed' | 'erro
 export type ComposerMode = 'chat' | 'run';
 export type FeedKind = 'assistant' | 'user' | 'run' | 'system' | 'event';
 export type TraceView = 'overview' | 'timeline' | 'delegates' | 'messages' | 'plans';
+export type ImageDetail = 'auto' | 'low' | 'high';
+
+export interface GatewayImageInput {
+  path: string;
+  detail?: ImageDetail;
+}
 
 export interface GatewayDefaults {
   socketUrl: string;
@@ -65,6 +71,8 @@ export interface LiveAgentEventSummary {
   seq?: number;
   status?: string;
   toolName?: string;
+  input?: unknown;
+  assistantContent?: string;
   detail?: string;
   timestamp: Date;
 }

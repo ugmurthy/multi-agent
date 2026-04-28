@@ -37,7 +37,7 @@ export interface BootstrapGatewayOptions {
   stores?: GatewayStores;
   postgresClient?: PostgresClient | PostgresPoolClient;
   scheduler?: Pick<SchedulerLoopOptions, 'idFactory' | 'leaseOwner' | 'now' | 'onError' | 'pollIntervalMs'>;
-  onShutdownProgress?: (message: string) => void;
+  onShutdownProgress?: (message: string) => void | Promise<void>;
 }
 
 export interface BootstrappedGateway {
@@ -214,7 +214,7 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
         bootId,
         pid: process.pid,
       });
-      options.onShutdownProgress?.('Draining in-flight background work...');
+      await emitShutdownProgress(options.onShutdownProgress, 'Draining in-flight background work...');
       await scheduler?.stop();
       scheduler = undefined;
       await cronFileSync?.stop();
@@ -223,17 +223,17 @@ export async function bootstrapGateway(options: BootstrapGatewayOptions = {}): P
         app.server.off('listening', startScheduler);
       }
       app.server.off('listening', logGatewayStarted);
-      options.onShutdownProgress?.('Flushing runtime logs...');
+      await emitShutdownProgress(options.onShutdownProgress, 'Flushing runtime logs...');
       await flushAdaptiveAgentLogger(agentRuntimeLogger);
       requestLogger?.info(GATEWAY_LOG_EVENTS.gateway_stopped, 'Gateway server stopped', {
         bootId,
         pid: process.pid,
         durationMs: Date.now() - bootStartedAtMs,
       });
-      options.onShutdownProgress?.('Closing request logs and persistence stores...');
+      await emitShutdownProgress(options.onShutdownProgress, 'Closing request logs and persistence stores...');
       await requestLogger?.close();
       await storeBundle?.close?.();
-      options.onShutdownProgress?.('Gateway shutdown complete.');
+      await emitShutdownProgress(options.onShutdownProgress, 'Gateway shutdown complete.');
     });
 
     return {
@@ -288,6 +288,13 @@ async function flushAdaptiveAgentLogger(logger: AdaptiveAgentLogger | undefined)
       reject(error);
     }
   });
+}
+
+async function emitShutdownProgress(
+  callback: BootstrapGatewayOptions['onShutdownProgress'],
+  message: string,
+): Promise<void> {
+  await callback?.(message);
 }
 
 function resolveCronFileSyncOptions(loadedGatewayConfig: LoadedConfig<GatewayConfig>): {

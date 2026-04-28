@@ -1,4 +1,8 @@
+import { readFile, stat } from 'node:fs/promises';
+import { extname } from 'node:path';
+
 import type {
+  ImageInput,
   JsonSchema,
   JsonValue,
   ModelAdapter,
@@ -33,11 +37,18 @@ export interface ModelInvocationDiagnostics {
 
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | OpenAIContentPart[] | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: OpenAIToolCall[];
+  reasoning?: string;
+  reasoning_content?: string;
+  reasoning_details?: JsonValue[];
 }
+
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
 interface OpenAIToolCall {
   id: string;
@@ -65,6 +76,9 @@ interface OpenAIChatCompletionResponse {
       role: 'assistant';
       content: string | null;
       tool_calls?: OpenAIToolCall[];
+      reasoning?: string;
+      reasoning_content?: string;
+      reasoning_details?: JsonValue[];
     };
     finish_reason: 'stop' | 'tool_calls' | 'length' | 'content_filter';
   }>;
@@ -72,6 +86,9 @@ interface OpenAIChatCompletionResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
+    };
   };
 }
 
@@ -80,12 +97,15 @@ const DEFAULT_CAPABILITIES: ModelCapabilities = {
   jsonOutput: true,
   streaming: false,
   usage: true,
+  imageInput: false,
 };
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const DEFAULT_MAX_RETRIES = 2;
 const INITIAL_RETRY_DELAY_MS = 500;
 const MAX_RETRY_DELAY_MS = 8_000;
+const MAX_LOCAL_IMAGE_BYTES = 10 * 1024 * 1024;
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 // Keep the local process from stampeding the same upstream/model when future
 // parallel sub-agents begin issuing requests concurrently without forcing the
 // whole process through a single in-flight request per model.
@@ -233,7 +253,7 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
   }
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
-    const body = this.buildRequestBody(request);
+    const body = await this.buildRequestBody(request);
     const headers = this.buildHeaders();
     const url = `${this.baseUrl}/chat/completions`;
 
@@ -308,12 +328,16 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
     }
   }
 
-  protected buildRequestBody(
+  protected async buildRequestBody(
     request: ModelRequest,
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown>> {
+    if (request.messages.some(messageHasImageInput) && !this.capabilities.imageInput) {
+      throw new Error(`${this.provider} model ${this.model} does not declare image input support`);
+    }
+
     const body: Record<string, unknown> = {
       model: this.model,
-      messages: request.messages.map((msg) => toOpenAIMessage(msg)),
+      messages: await Promise.all(request.messages.map((msg) => toOpenAIMessage(msg))),
     };
 
     if (request.tools && request.tools.length > 0 && this.capabilities.toolCalling) {
@@ -364,6 +388,8 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
     );
 
     const text = choice.message.content ?? undefined;
+    const reasoning = choice.message.reasoning ?? choice.message.reasoning_content ?? undefined;
+    const reasoningDetails = normalizeReasoningDetails(choice.message.reasoning_details);
     const structuredOutput = text ? tryParseJson(text) : undefined;
 
     const finishReason = mapFinishReason(choice.finish_reason);
@@ -372,6 +398,7 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
       ? {
           promptTokens: data.usage.prompt_tokens,
           completionTokens: data.usage.completion_tokens,
+          reasoningTokens: data.usage.completion_tokens_details?.reasoning_tokens,
           totalTokens: data.usage.total_tokens,
           estimatedCostUSD: 0,
           provider: this.provider,
@@ -386,6 +413,8 @@ export class BaseOpenAIChatAdapter implements ModelAdapter {
       finishReason,
       usage,
       providerResponseId: data.id,
+      reasoning,
+      reasoningDetails,
     };
   }
 }
@@ -519,20 +548,23 @@ function normalizeMaxConcurrentRequests(value: number | undefined): number {
   return value;
 }
 
-function toOpenAIMessage(msg: ModelMessage): OpenAIMessage {
+async function toOpenAIMessage(msg: ModelMessage): Promise<OpenAIMessage> {
   if (msg.role === 'tool') {
     return {
       role: 'tool',
-      content: msg.content,
+      content: contentAsText(msg.content),
       tool_call_id: msg.toolCallId ?? '',
     };
   }
 
   if (msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0) {
+    const content = contentAsText(msg.content);
     return {
       role: 'assistant',
-      content: msg.content.length > 0 ? msg.content : null,
+      content: content.length > 0 ? content : null,
       name: msg.name,
+      ...(msg.reasoning === undefined ? {} : { reasoning: msg.reasoning }),
+      ...(msg.reasoningDetails === undefined ? {} : { reasoning_details: msg.reasoningDetails }),
       tool_calls: msg.toolCalls.map((toolCall) => ({
         id: toolCall.id,
         type: 'function',
@@ -546,9 +578,98 @@ function toOpenAIMessage(msg: ModelMessage): OpenAIMessage {
 
   return {
     role: msg.role,
-    content: msg.content,
+    content: await toOpenAIContent(msg.content),
     name: msg.name,
+    ...(msg.role !== 'assistant' || msg.reasoning === undefined ? {} : { reasoning: msg.reasoning }),
+    ...(msg.role !== 'assistant' || msg.reasoningDetails === undefined ? {} : { reasoning_details: msg.reasoningDetails }),
   };
+}
+
+function messageHasImageInput(message: ModelMessage): boolean {
+  return Array.isArray(message.content) && message.content.some((part) => part.type === 'image');
+}
+
+async function toOpenAIContent(content: ModelMessage['content']): Promise<string | OpenAIContentPart[]> {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  return Promise.all(
+    content.map(async (part): Promise<OpenAIContentPart> => {
+      if (part.type === 'text') {
+        return { type: 'text', text: part.text };
+      }
+
+      const imageUrl: { url: string; detail?: 'auto' | 'low' | 'high' } = {
+        url: await localImageToDataUrl(part.image),
+      };
+      if (part.image.detail) {
+        imageUrl.detail = part.image.detail;
+      }
+      return { type: 'image_url', image_url: imageUrl };
+    }),
+  );
+}
+
+function contentAsText(content: ModelMessage['content']): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  const textParts: string[] = [];
+  for (const part of content) {
+    if (part.type === 'text') {
+      textParts.push(part.text);
+    }
+  }
+
+  return textParts.join('\n');
+}
+
+async function localImageToDataUrl(image: ImageInput): Promise<string> {
+  if (!image.path.trim()) {
+    throw new Error('Image input requires a non-empty path');
+  }
+
+  const mimeType = normalizeImageMimeType(image.mimeType ?? inferImageMimeType(image.path));
+  const fileStats = await stat(image.path);
+  if (!fileStats.isFile()) {
+    throw new Error(`Image input path is not a file: ${image.path}`);
+  }
+  if (fileStats.size > MAX_LOCAL_IMAGE_BYTES) {
+    throw new Error(`Image input ${image.path} exceeds maximum size of ${MAX_LOCAL_IMAGE_BYTES} bytes`);
+  }
+
+  const imageBuffer = await readFile(image.path);
+  if (imageBuffer.byteLength > MAX_LOCAL_IMAGE_BYTES) {
+    throw new Error(`Image input ${image.path} exceeds maximum size of ${MAX_LOCAL_IMAGE_BYTES} bytes`);
+  }
+
+  return `data:${mimeType};base64,${imageBuffer.toString('base64')}`;
+}
+
+function inferImageMimeType(filePath: string): string | undefined {
+  switch (extname(filePath).toLowerCase()) {
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.webp':
+      return 'image/webp';
+    case '.gif':
+      return 'image/gif';
+    default:
+      return undefined;
+  }
+}
+
+function normalizeImageMimeType(mimeType: string | undefined): string {
+  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    throw new Error(`Unsupported image MIME type${mimeType ? `: ${mimeType}` : ''}`);
+  }
+
+  return mimeType;
 }
 
 function toOpenAITool(
@@ -596,6 +717,10 @@ function tryParseJson(text: string): JsonValue | undefined {
   }
 
   return undefined;
+}
+
+function normalizeReasoningDetails(value: JsonValue[] | undefined): JsonValue[] | undefined {
+  return Array.isArray(value) ? value : undefined;
 }
 
 function mapFinishReason(

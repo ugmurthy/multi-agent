@@ -7,7 +7,7 @@ import type {
 } from './protocol';
 
 import { isClarificationRequestOutput } from './format';
-import type { GatewayDefaults, GatewayWebClientOptions, SocketState } from './types';
+import type { GatewayDefaults, GatewayImageInput, GatewayWebClientOptions, SocketState } from './types';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -94,22 +94,24 @@ export class GatewayWebClient {
     this.socket?.close(code, reason);
   }
 
-  async sendChat(content: string): Promise<void> {
+  async sendChat(content: string, images?: GatewayImageInput[]): Promise<void> {
     const sessionId = await this.ensureChatSessionId();
 
     this.sendFrame({
       type: 'message.send',
       sessionId,
       content,
+      images,
     });
   }
 
-  async startRun(goal: string): Promise<void> {
+  async startRun(goal: string, images?: GatewayImageInput[]): Promise<void> {
     const sessionId = await this.ensureRunSessionId();
     this.sendFrame({
       type: 'run.start',
       sessionId,
       goal,
+      images,
     });
   }
 

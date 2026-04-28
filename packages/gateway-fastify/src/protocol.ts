@@ -1,4 +1,4 @@
-import type { JsonObject, JsonValue } from './core.js';
+import type { ImageInput, JsonObject, JsonValue } from './core.js';
 import type { InvocationMode } from './config.js';
 
 export const INBOUND_FRAME_TYPES = [
@@ -58,6 +58,7 @@ export interface MessageSendFrame {
   type: 'message.send';
   sessionId: string;
   content: string;
+  images?: ImageInput[];
   metadata?: JsonObject;
 }
 
@@ -67,6 +68,7 @@ export interface RunStartFrame {
   agentId?: string;
   goal: string;
   input?: JsonValue;
+  images?: ImageInput[];
   context?: JsonObject;
   metadata?: JsonObject;
 }
@@ -337,6 +339,7 @@ function validateMessageSendFrame(frame: Record<string, unknown>, issues: string
     type: 'message.send',
     sessionId: expectNonEmptyString(frame.sessionId, 'frame.sessionId', issues) ?? 'invalid-session-id',
     content: expectNonEmptyString(frame.content, 'frame.content', issues) ?? 'invalid-content',
+    images: expectOptionalImageInputs(frame.images, 'frame.images', issues),
     metadata: expectOptionalJsonObject(frame.metadata, 'frame.metadata', issues),
   };
 
@@ -350,6 +353,7 @@ function validateRunStartFrame(frame: Record<string, unknown>, issues: string[])
     agentId: expectOptionalNonEmptyString(frame.agentId, 'frame.agentId', issues),
     goal: expectNonEmptyString(frame.goal, 'frame.goal', issues) ?? 'invalid-goal',
     input: expectOptionalJsonValue(frame.input, 'frame.input', issues),
+    images: expectOptionalImageInputs(frame.images, 'frame.images', issues),
     context: expectOptionalJsonObject(frame.context, 'frame.context', issues),
     metadata: expectOptionalJsonObject(frame.metadata, 'frame.metadata', issues),
   };
@@ -505,6 +509,62 @@ function expectStringArray(value: unknown, path: string, issues: string[]): stri
   }
 
   return items;
+}
+
+function expectOptionalImageInputs(value: unknown, path: string, issues: string[]): ImageInput[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    issues.push(`${path} must be an array.`);
+    return undefined;
+  }
+
+  const images: ImageInput[] = [];
+  for (const [index, entry] of value.entries()) {
+    const image = expectImageInput(entry, `${path}[${index}]`, issues);
+    if (image) {
+      images.push(image);
+    }
+  }
+
+  return images;
+}
+
+function expectImageInput(value: unknown, path: string, issues: string[]): ImageInput | undefined {
+  const image = expectObject(value, path, issues);
+  if (!image) {
+    return undefined;
+  }
+
+  const pathValue = expectNonEmptyString(image.path, `${path}.path`, issues);
+  const mimeType = expectOptionalNonEmptyString(image.mimeType, `${path}.mimeType`, issues);
+  const detail = expectOptionalImageDetail(image.detail, `${path}.detail`, issues);
+  const name = expectOptionalNonEmptyString(image.name, `${path}.name`, issues);
+  if (!pathValue) {
+    return undefined;
+  }
+
+  return {
+    path: pathValue,
+    ...(mimeType ? { mimeType } : {}),
+    ...(detail ? { detail } : {}),
+    ...(name ? { name } : {}),
+  };
+}
+
+function expectOptionalImageDetail(value: unknown, path: string, issues: string[]): ImageInput['detail'] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === 'auto' || value === 'low' || value === 'high') {
+    return value;
+  }
+
+  issues.push(`${path} must be one of "auto", "low", or "high".`);
+  return undefined;
 }
 
 function expectOptionalJsonObject(value: unknown, path: string, issues: string[]): JsonObject | undefined {

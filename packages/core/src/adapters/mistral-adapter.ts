@@ -22,6 +22,7 @@ export class MistralAdapter extends BaseOpenAIChatAdapter {
         jsonOutput: true,
         streaming: true,
         usage: true,
+        imageInput: true,
       },
     };
 

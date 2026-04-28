@@ -40,9 +40,7 @@ async function main(): Promise<void> {
     agentConfigDir: AGENT_CONFIG_DIR,
     logDir,
     moduleRegistry,
-    onShutdownProgress: (message) => {
-      console.log(message);
-    },
+    onShutdownProgress: (message) => writeConsoleLine(message),
   });
 
   console.log('AdaptiveAgent gateway is running.');
@@ -79,14 +77,14 @@ async function main(): Promise<void> {
     }
 
     shutdownPromise = (async () => {
-      console.log(`\nReceived ${signal}, shutting down gateway...`);
+      await writeConsoleLine(`\nReceived ${signal}, shutting down gateway...`);
 
       try {
         await gateway.app.close();
         process.exitCode = signal === 'SIGINT' ? 130 : 0;
       } catch (error) {
         process.exitCode = 1;
-        console.error(
+        await writeErrorLine(
           'Gateway shutdown failed.',
           error instanceof Error ? error.message : 'Unknown shutdown error.',
         );
@@ -346,6 +344,30 @@ function formatLogDestination(destination: 'console' | 'file' | 'both', destinat
   }
 
   return `${destination} -> ${destinationPath}`;
+}
+
+async function writeConsoleLine(message: string): Promise<void> {
+  await writeLine(process.stdout, message);
+}
+
+async function writeErrorLine(...parts: string[]): Promise<void> {
+  await writeLine(process.stderr, parts.join(' '));
+}
+
+async function writeLine(
+  stream: NodeJS.WriteStream,
+  message: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    stream.write(`${message}\n`, (error?: Error | null) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
 }
 
 await main().catch((error) => {

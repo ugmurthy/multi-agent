@@ -15,6 +15,7 @@ export interface TuiClientState {
   approvalSessionIds: Map<string, string>;
   clarificationSessionIds: Map<string, string>;
   failedRunSessionIds: Map<string, string>;
+  lastAssistantContentByRun: Map<string, string>;
   connected: boolean;
 }
 

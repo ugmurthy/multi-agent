@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline/promises';
 import type { AgentEventFrame, SessionOpenedFrame } from './protocol.js';
 import { GATEWAY_CONFIG_PATH, loadLocalGatewayConnectionConfig } from './local-dev.js';
 import { mintLocalDevJwt } from './local-dev-jwt.js';
-import { formatCompactAgentEventFrame } from './local-event-format.js';
+import { extractAssistantContentForEvent, formatCompactAgentEventFrame } from './local-event-format.js';
 import {
   type ClientOptions,
   type EventStreamMode,
@@ -64,6 +64,7 @@ interface ClientState extends InteractiveSessionState, FailedRunTrackingState {
   eventMode: EventStreamMode;
   approvalSessionIds: Map<string, string>;
   clarificationSessionIds: Map<string, string>;
+  lastAssistantContentByRun: Map<string, string>;
 }
 
 const RUN_TERMINAL_EVENT_TYPES = new Set(['run.completed', 'run.failed']);
@@ -136,6 +137,7 @@ async function main(): Promise<void> {
     approvalSessionIds: new Map(),
     clarificationSessionIds: new Map(),
     failedRunSessionIds: new Map(),
+    lastAssistantContentByRun: new Map(),
   };
   const token = options.token ?? (await mintLocalDevJwt({
     subject: options.subject,
@@ -276,7 +278,20 @@ async function main(): Promise<void> {
         }
 
         if (!options.verbose) {
-          console.log(state.eventMode === 'compact' ? formatCompactAgentEventFrame(frame) : formatVerboseAgentEventFrame(frame));
+          if (state.eventMode === 'compact') {
+            const assistantContent = extractAssistantContentForEvent(frame);
+            if (assistantContent && frame.runId) {
+              const lastShown = state.lastAssistantContentByRun.get(frame.runId);
+              if (lastShown !== assistantContent) {
+                state.lastAssistantContentByRun.set(frame.runId, assistantContent);
+                console.log('assistant>');
+                console.log(assistantContent);
+              }
+            }
+            console.log(formatCompactAgentEventFrame(frame));
+          } else {
+            console.log(formatVerboseAgentEventFrame(frame));
+          }
         }
         break;
       case 'error':

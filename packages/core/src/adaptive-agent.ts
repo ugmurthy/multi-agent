@@ -21,10 +21,13 @@ import type {
   ExecutePlanRequest,
   EventSink,
   FailureKind,
+  ImageInput,
   JsonObject,
   JsonSchema,
   JsonValue,
+  ModelContentPart,
   ModelMessage,
+  ModelMessageContent,
   ModelToolCall,
   ModelResponse,
   PlanCondition,
@@ -48,6 +51,7 @@ interface PendingToolCallState {
   id: string;
   name: string;
   input: JsonValue;
+  assistantContent?: string;
   stepId: string;
   needsStepStarted: boolean;
 }
@@ -83,6 +87,7 @@ interface ToolBudgetUsage {
 interface RunContinuationOptions {
   outputSchema?: JsonSchema;
   retryFailedChild?: boolean;
+  initialState?: ExecutionState;
 }
 
 type FailedRunRetryability =
@@ -189,24 +194,25 @@ export class AdaptiveAgent {
   }
 
   async run(request: RunRequest): Promise<RunResult> {
-    const { run: createdRun } = await this.createRunWithInitialSnapshot({
+    const { run: createdRun, state } = await this.createRunWithInitialSnapshot({
       goal: request.goal,
       input: request.input,
       context: request.context,
       metadata: request.metadata,
       status: 'queued',
-    }, (run) => this.createInitialExecutionState(run, request.outputSchema));
+    }, (run) => this.createInitialExecutionState(run, request.outputSchema, request.images));
 
     this.logLifecycle('info', 'run.created', {
       ...runLogBindings(createdRun),
       goal: summarizeValueForLog(request.goal),
       input: captureValueForLog(request.input, { mode: this.defaultCaptureMode }),
+      images: summarizeImagesForLog(request.images),
       context: captureValueForLog(request.context, { mode: this.defaultCaptureMode }),
       metadata: captureValueForLog(request.metadata, { mode: 'summary' }),
       outputSchema: request.outputSchema ? summarizeValueForLog(request.outputSchema) : undefined,
     });
 
-    return this.runWithExistingRun(createdRun.id, { outputSchema: request.outputSchema });
+    return this.runWithExistingRun(createdRun.id, { outputSchema: request.outputSchema, initialState: state });
   }
 
   async chat(request: ChatRequest): Promise<ChatResult> {
@@ -217,7 +223,7 @@ export class AdaptiveAgent {
       this.buildRuntimeToolManifestMessage(),
     );
     const goal = summarizeChatGoal(request.messages);
-    const { run: createdRun } = await this.createRunWithInitialSnapshot({
+    const { run: createdRun, state } = await this.createRunWithInitialSnapshot({
       goal,
       context: request.context,
       metadata: request.metadata,
@@ -232,9 +238,10 @@ export class AdaptiveAgent {
       outputSchema: request.outputSchema ? summarizeValueForLog(request.outputSchema) : undefined,
       chat: true,
       messageCount: request.messages.length,
+      imageCount: countChatImages(request.messages),
     });
 
-    return this.runWithExistingRun(createdRun.id, { outputSchema: request.outputSchema });
+    return this.runWithExistingRun(createdRun.id, { outputSchema: request.outputSchema, initialState: state });
   }
 
   async plan(_request: PlanRequest): Promise<never> {
@@ -666,6 +673,7 @@ export class AdaptiveAgent {
       schemaVersion: 1,
       payload: {
         toolName: pendingToolCall.name,
+        ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
         approved,
       },
     });
@@ -848,7 +856,7 @@ export class AdaptiveAgent {
       throw new Error(`Run ${runId} does not exist`);
     }
 
-    const state = await this.loadExecutionState(run, options.outputSchema);
+    const state = options.initialState ?? await this.loadExecutionState(run, options.outputSchema);
     if (TERMINAL_RUN_STATUSES.has(run.status)) {
       return this.resultFromStoredRun(run, state.stepsUsed);
     }
@@ -1056,7 +1064,9 @@ export class AdaptiveAgent {
       }
 
       if (response.toolCalls && response.toolCalls.length > 0) {
-        state.pendingToolCalls.push(...createPendingToolCalls(response.toolCalls, state.stepsUsed + 1));
+        state.pendingToolCalls.push(
+          ...createPendingToolCalls(response.toolCalls, state.stepsUsed + 1, assistantMessage?.content),
+        );
 
         this.logLifecycle('debug', 'model.tool_calls_queued', {
           ...runLogBindings(currentRun),
@@ -1265,6 +1275,7 @@ export class AdaptiveAgent {
         schemaVersion: 1,
         payload: {
           toolName: tool.name,
+          ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
           ...(eventInput === undefined ? {} : { input: eventInput }),
         },
       });
@@ -1326,11 +1337,12 @@ export class AdaptiveAgent {
             toolCallId: pendingToolCall.id,
             type: 'tool.completed',
             schemaVersion: 1,
-            payload: {
-              toolName: tool.name,
-              ...(eventInput === undefined ? {} : { input: eventInput }),
-              output: budgetOutput,
-              ...(budgetGroup === undefined ? {} : { budgetGroup }),
+          payload: {
+            toolName: tool.name,
+            ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
+            ...(eventInput === undefined ? {} : { input: eventInput }),
+            output: budgetOutput,
+            ...(budgetGroup === undefined ? {} : { budgetGroup }),
               skipped: true,
             },
           },
@@ -1364,6 +1376,7 @@ export class AdaptiveAgent {
         schemaVersion: 1,
         payload: {
           toolName: tool.name,
+          ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
           ...(eventInput === undefined ? {} : { input: eventInput }),
         },
       });
@@ -1390,6 +1403,7 @@ export class AdaptiveAgent {
       const eventInput = captureToolInputForLog(tool, pendingToolCall.input, this.defaultCaptureMode);
       const completionPayload: JsonObject = {
         toolName: tool.name,
+        ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
         ...(eventInput === undefined ? {} : { input: eventInput }),
         output: tool.summarizeResult ? tool.summarizeResult(output) : output,
       };
@@ -1450,6 +1464,7 @@ export class AdaptiveAgent {
           schemaVersion: 1,
           payload: {
             toolName: tool.name,
+            ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
             ...(eventInput === undefined ? {} : { input: eventInput }),
             error: error instanceof Error ? error.message : String(error),
             recoverable: recoveredOutput !== undefined,
@@ -1866,9 +1881,9 @@ export class AdaptiveAgent {
     state.toolBudgetUsage[budgetGroup] = usage;
   }
 
-  private createInitialExecutionState(run: AgentRun, outputSchema?: JsonSchema): ExecutionState {
+  private createInitialExecutionState(run: AgentRun, outputSchema?: JsonSchema, images?: ImageInput[]): ExecutionState {
     return this.createExecutionState(
-      buildInitialMessages(run, outputSchema, this.options.systemInstructions, this.buildRuntimeToolManifestMessage()),
+      buildInitialMessages(run, outputSchema, this.options.systemInstructions, this.buildRuntimeToolManifestMessage(), images),
       outputSchema,
     );
   }
@@ -2244,11 +2259,28 @@ export class AdaptiveAgent {
     };
     const startedAt = Date.now();
     const timeoutContext = createAbortTimeoutContext(this.defaults.modelTimeoutMs);
+    const modelTimeoutMs = this.defaults.modelTimeoutMs;
+    const modelProvider = this.options.model.provider;
+    const modelName = this.options.model.model;
 
     this.logLifecycle('debug', 'model.request', {
       ...runLogBindings(run),
       stepId: run.currentStepId,
       ...summarizeModelRequestForLog(modelRequest),
+    });
+
+    await this.emit({
+      runId: run.id,
+      stepId: run.currentStepId,
+      type: 'model.started',
+      schemaVersion: 1,
+      payload: {
+        stepId: run.currentStepId,
+        modelTimeoutMs,
+        provider: modelProvider,
+        model: modelName,
+        startedAt: new Date(startedAt).toISOString(),
+      },
     });
 
     let response: ModelResponse;
@@ -2261,26 +2293,62 @@ export class AdaptiveAgent {
       const modelError = timeoutContext.didTimeout()
         ? createModelTimeoutError(this.defaults.modelTimeoutMs, error)
         : error;
+      const durationMs = Date.now() - startedAt;
       this.logLifecycle('error', 'model.failed', {
         ...runLogBindings(run),
         stepId: run.currentStepId,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         ...summarizeModelFailureForLog(modelError, {
-          modelTimeoutMs: this.defaults.modelTimeoutMs,
+          modelTimeoutMs,
           timedOut: timeoutContext.didTimeout(),
         }),
         error: errorForLog(modelError),
       });
+      try {
+        await this.emit({
+          runId: run.id,
+          stepId: run.currentStepId,
+          type: 'model.failed',
+          schemaVersion: 1,
+          payload: {
+            stepId: run.currentStepId,
+            durationMs,
+            timedOut: timeoutContext.didTimeout(),
+            modelTimeoutMs,
+            provider: modelProvider,
+            model: modelName,
+            error: modelError instanceof Error ? modelError.message : String(modelError),
+          },
+        });
+      } catch {
+        // best-effort emit; failure here must not mask the original model error
+      }
       throw modelError;
     } finally {
       timeoutContext.dispose();
     }
 
+    const durationMs = Date.now() - startedAt;
     this.logLifecycle('debug', 'model.response', {
       ...runLogBindings(run),
       stepId: run.currentStepId,
-      durationMs: Date.now() - startedAt,
+      durationMs,
       ...summarizeModelResponseForLog(response),
+    });
+
+    await this.emit({
+      runId: run.id,
+      stepId: run.currentStepId,
+      type: 'model.completed',
+      schemaVersion: 1,
+      payload: {
+        stepId: run.currentStepId,
+        durationMs,
+        provider: modelProvider,
+        model: modelName,
+        finishReason: response.finishReason,
+        toolCallCount: response.toolCalls?.length ?? 0,
+      },
     });
 
     if (response.usage) {
@@ -2804,6 +2872,7 @@ function buildInitialMessages(
   outputSchema?: JsonSchema,
   systemInstructions?: string,
   toolManifestMessage?: ModelMessage,
+  images?: ImageInput[],
 ): ModelMessage[] {
   const requestPayload: JsonObject = {
     goal: run.goal,
@@ -2820,7 +2889,7 @@ function buildInitialMessages(
     ...(toolManifestMessage ? [toolManifestMessage] : []),
     {
       role: 'user',
-      content: JSON.stringify(requestPayload, null, 2),
+      content: buildUserMessageContent(JSON.stringify(requestPayload, null, 2), images),
     },
   ];
 }
@@ -2851,9 +2920,40 @@ function buildInitialChatMessages(
     ...contextMessage,
     ...messages.map((message) => ({
       role: message.role,
-      content: message.content,
+      content: buildUserMessageContent(message.content, message.images),
     })),
   ];
+}
+
+function buildUserMessageContent(text: string, images?: ImageInput[]): ModelMessageContent {
+  if (!images || images.length === 0) {
+    return text;
+  }
+
+  return [
+    { type: 'text', text },
+    ...images.map((image): ModelContentPart => ({
+      type: 'image',
+      image,
+    })),
+  ];
+}
+
+function summarizeImagesForLog(images: ImageInput[] | undefined): JsonValue | undefined {
+  if (!images || images.length === 0) {
+    return undefined;
+  }
+
+  return images.map((image) => ({
+    path: image.path,
+    mimeType: image.mimeType,
+    detail: image.detail,
+    name: image.name,
+  }));
+}
+
+function countChatImages(messages: ChatMessage[]): number {
+  return messages.reduce((count, message) => count + (message.images?.length ?? 0), 0);
 }
 
 function summarizeChatGoal(messages: ChatMessage[]): string {
@@ -2979,6 +3079,7 @@ function serializePendingToolCall(pendingToolCall: PendingToolCallState): JsonOb
     id: pendingToolCall.id,
     name: pendingToolCall.name,
     input: pendingToolCall.input,
+    ...(pendingToolCall.assistantContent === undefined ? {} : { assistantContent: pendingToolCall.assistantContent }),
     stepId: pendingToolCall.stepId,
     needsStepStarted: pendingToolCall.needsStepStarted,
   };
@@ -3016,6 +3117,7 @@ function deserializePendingToolCall(value: JsonValue | undefined): PendingToolCa
     id: value.id,
     name: value.name,
     input: value.input ?? null,
+    assistantContent: typeof value.assistantContent === 'string' ? value.assistantContent : undefined,
     stepId: value.stepId,
     needsStepStarted: value.needsStepStarted === true,
   };
@@ -3053,9 +3155,50 @@ function isModelMessage(value: unknown): value is ModelMessage {
   const candidate = value as Record<string, unknown>;
   return (
     typeof candidate.role === 'string' &&
-    typeof candidate.content === 'string' &&
+    isModelMessageContent(candidate.content) &&
     ['system', 'user', 'assistant', 'tool'].includes(candidate.role) &&
-    (candidate.toolCalls === undefined || isModelToolCallArray(candidate.toolCalls))
+    (candidate.toolCalls === undefined || isModelToolCallArray(candidate.toolCalls)) &&
+    (candidate.reasoning === undefined || typeof candidate.reasoning === 'string') &&
+    (candidate.reasoningDetails === undefined || isJsonValueArray(candidate.reasoningDetails))
+  );
+}
+
+function isModelMessageContent(value: unknown): value is ModelMessageContent {
+  return typeof value === 'string' || isModelContentPartArray(value);
+}
+
+function isModelContentPartArray(value: unknown): value is ModelContentPart[] {
+  return Array.isArray(value) && value.every(isModelContentPart);
+}
+
+function isModelContentPart(value: unknown): value is ModelContentPart {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (candidate.type === 'text') {
+    return typeof candidate.text === 'string';
+  }
+
+  if (candidate.type === 'image') {
+    return isImageInput(candidate.image);
+  }
+
+  return false;
+}
+
+function isImageInput(value: unknown): value is ImageInput {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.path === 'string' &&
+    (candidate.mimeType === undefined || typeof candidate.mimeType === 'string') &&
+    (candidate.detail === undefined || ['auto', 'low', 'high'].includes(String(candidate.detail))) &&
+    (candidate.name === undefined || typeof candidate.name === 'string')
   );
 }
 
@@ -3069,6 +3212,8 @@ function assistantMessageFromResponse(response: ModelResponse): ModelMessage | n
     role: 'assistant',
     content,
     toolCalls: response.toolCalls,
+    reasoning: response.reasoning,
+    reasoningDetails: response.reasoningDetails,
   };
 }
 
@@ -3085,7 +3230,11 @@ function isModelToolCall(value: unknown): value is ModelToolCall {
   return typeof candidate.id === 'string' && typeof candidate.name === 'string' && 'input' in candidate;
 }
 
-function createPendingToolCalls(toolCalls: ModelResponse['toolCalls'], nextStepNumber: number): PendingToolCallState[] {
+function createPendingToolCalls(
+  toolCalls: ModelResponse['toolCalls'],
+  nextStepNumber: number,
+  assistantContent?: string,
+): PendingToolCallState[] {
   if (!toolCalls) {
     return [];
   }
@@ -3094,6 +3243,7 @@ function createPendingToolCalls(toolCalls: ModelResponse['toolCalls'], nextStepN
     id: toolCall.id,
     name: toolCall.name,
     input: toolCall.input,
+    assistantContent,
     stepId: `step-${nextStepNumber + index}`,
     needsStepStarted: index > 0,
   }));
@@ -3106,6 +3256,31 @@ function toolResultMessage(pendingToolCall: PendingToolCallState, output: JsonVa
     toolCallId: pendingToolCall.id,
     content: JSON.stringify(output),
   };
+}
+
+function isJsonValueArray(value: unknown): value is JsonValue[] {
+  return Array.isArray(value) && value.every(isJsonValueLike);
+}
+
+function isJsonValueLike(value: unknown): value is JsonValue {
+  if (value === null) {
+    return true;
+  }
+
+  switch (typeof value) {
+    case 'string':
+    case 'number':
+    case 'boolean':
+      return true;
+    case 'object':
+      if (Array.isArray(value)) {
+        return value.every(isJsonValueLike);
+      }
+
+      return Object.values(value as Record<string, unknown>).every(isJsonValueLike);
+    default:
+      return false;
+  }
 }
 
 function emptyToolBudgetUsage(): ToolBudgetUsage {

@@ -149,6 +149,44 @@ describe('AdaptiveAgent', () => {
     expect(storedRun?.goal).toBe('What is the capital of France?');
   });
 
+  it('adds run image inputs to the initial user model message without embedding bytes', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'stop',
+        text: 'The receipt total is $12.50.',
+      },
+    ]);
+
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [],
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const result = await agent.run({
+      goal: 'Read the receipt total.',
+      images: [{ path: '/tmp/receipt.png', detail: 'high' }],
+    });
+
+    expect(result.status).toBe('success');
+    const userMessage = model.receivedRequests[0].messages.at(-1);
+    expect(userMessage?.content).toEqual([
+      {
+        type: 'text',
+        text: expect.stringContaining('Read the receipt total.'),
+      },
+      {
+        type: 'image',
+        image: { path: '/tmp/receipt.png', detail: 'high' },
+      },
+    ]);
+  });
+
   it('injects a runtime tool manifest after the initial system message by default', async () => {
     const runStore = new InMemoryRunStore();
     const model = new SequenceModel([
@@ -637,6 +675,73 @@ describe('AdaptiveAgent', () => {
     expect(parentEvents.filter((event) => event.type === 'delegate.spawned')).toHaveLength(1);
   });
 
+  it('accepts string-valued delegate tool arguments as the delegate goal', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'delegate-call-1',
+            name: 'delegate.researcher',
+            input: 'Research delegation',
+          },
+        ],
+      },
+      {
+        finishReason: 'tool_calls',
+        toolCalls: [
+          {
+            id: 'child-call-1',
+            name: 'lookup',
+            input: { topic: 'delegation' },
+          },
+        ],
+      },
+      {
+        finishReason: 'stop',
+        structuredOutput: {
+          finding: 'researched:delegation',
+        },
+      },
+      {
+        finishReason: 'stop',
+        structuredOutput: {
+          report: 'delegation complete',
+        },
+      },
+    ]);
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createLookupTool()],
+      delegates: [
+        {
+          name: 'researcher',
+          description: 'Researches a topic using the lookup tool.',
+          allowedTools: ['lookup'],
+        },
+      ],
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const result = await agent.run({ goal: 'Delegate this research task' });
+    const childRuns = await runStore.listChildren(result.runId);
+
+    expect(result).toMatchObject({
+      status: 'success',
+      output: { report: 'delegation complete' },
+    });
+    expect(childRuns).toHaveLength(1);
+    expect(childRuns[0]).toMatchObject({
+      delegateName: 'researcher',
+      goal: 'Research delegation',
+    });
+  });
+
   it('retries a failed delegated child in place for retryable model timeouts', async () => {
     const runStore = new InMemoryRunStore();
     const eventStore = new InMemoryEventStore();
@@ -721,6 +826,84 @@ describe('AdaptiveAgent', () => {
     });
     const parentEvents = await eventStore.listByRun(failed.runId);
     expect(parentEvents.filter((event) => event.type === 'delegate.spawned')).toHaveLength(1);
+  });
+
+  it('preserves assistant reasoning blocks across retry after a timeout', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const model = new SequenceModel([
+      {
+        finishReason: 'tool_calls',
+        reasoning: 'Need to look this up before answering.',
+        reasoningDetails: [
+          {
+            type: 'reasoning.text',
+            text: 'Need to look this up before answering.',
+            format: 'openai-responses-v1',
+          },
+        ],
+        toolCalls: [
+          {
+            id: 'lookup-call-1',
+            name: 'lookup',
+            input: { topic: 'retry' },
+          },
+        ],
+      },
+      new Error('Model timed out after 90000ms'),
+      {
+        finishReason: 'stop',
+        structuredOutput: {
+          report: 'recovered after retry',
+        },
+      },
+    ], 'openrouter');
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createLookupTool()],
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const failed = await agent.run({ goal: 'Use a tool and then recover from timeout' });
+    expect(failed).toMatchObject({
+      status: 'failure',
+      code: 'MODEL_ERROR',
+    });
+
+    const retried = await agent.retry(failed.runId);
+    expect(retried).toMatchObject({
+      status: 'success',
+      output: {
+        report: 'recovered after retry',
+      },
+    });
+
+    expect(model.receivedRequests).toHaveLength(3);
+
+    const retryRequestMessages = model.receivedRequests[2]?.messages ?? [];
+    const assistantMessage = retryRequestMessages.find((message) => message.role === 'assistant');
+    expect(assistantMessage).toMatchObject({
+      role: 'assistant',
+      content: '',
+      reasoning: 'Need to look this up before answering.',
+      reasoningDetails: [
+        {
+          type: 'reasoning.text',
+          text: 'Need to look this up before answering.',
+          format: 'openai-responses-v1',
+        },
+      ],
+      toolCalls: [
+        {
+          id: 'lookup-call-1',
+          name: 'lookup',
+          input: { topic: 'retry' },
+        },
+      ],
+    });
   });
 
   it('rejects parent retry when the linked delegated child is not retryable', async () => {
@@ -2332,6 +2515,114 @@ describe('AdaptiveAgent', () => {
     const approvalEvents = await eventStore.listByRun(firstResult.runId);
     expect(approvalEvents.some((event) => event.type === 'approval.requested')).toBe(true);
     expect(approvalEvents.some((event) => event.type === 'approval.resolved')).toBe(true);
+  });
+
+  it('carries assistant tool-call text into queued tool state and lifecycle events', async () => {
+    const runStore = new InMemoryRunStore();
+    const eventStore = new InMemoryEventStore();
+    const snapshotStore = new InMemorySnapshotStore();
+    const gatedExecute = vi.fn(async () => ({ ok: true }));
+    const assistantContent = 'I will update the protected record after you approve this action.';
+    const agent = new AdaptiveAgent({
+      model: new SequenceModel([
+        {
+          finishReason: 'tool_calls',
+          text: assistantContent,
+          toolCalls: [
+            {
+              id: 'approval-call-2',
+              name: 'secure.write',
+              input: { recordId: 'doc-2' },
+            },
+          ],
+        },
+        {
+          finishReason: 'stop',
+          structuredOutput: { status: 'done' },
+        },
+      ]),
+      tools: [
+        {
+          name: 'secure.write',
+          description: 'Writes a protected record.',
+          inputSchema: { type: 'object', additionalProperties: true },
+          requiresApproval: true,
+          execute: gatedExecute,
+        },
+      ],
+      runStore,
+      eventStore,
+      snapshotStore,
+    });
+
+    const firstResult = await agent.run({ goal: 'Write another protected record' });
+    if (firstResult.status !== 'approval_requested') {
+      throw new Error(`Expected approval_requested, received ${firstResult.status}`);
+    }
+
+    const latestSnapshot = await snapshotStore.getLatest(firstResult.runId);
+    expect(latestSnapshot?.state).toMatchObject({
+      schemaVersion: 1,
+      pendingToolCall: {
+        name: 'secure.write',
+        assistantContent,
+      },
+      pendingToolCalls: [
+        {
+          name: 'secure.write',
+          assistantContent,
+        },
+      ],
+    });
+
+    const approvalEvents = await eventStore.listByRun(firstResult.runId);
+    expect(approvalEvents).toContainEqual(
+      expect.objectContaining({
+        type: 'approval.requested',
+        payload: expect.objectContaining({
+          toolName: 'secure.write',
+          assistantContent,
+        }),
+      }),
+    );
+
+    await agent.resolveApproval(firstResult.runId, true);
+    const completed = await agent.resume(firstResult.runId);
+    expect(completed).toMatchObject({
+      status: 'success',
+      output: { status: 'done' },
+    });
+
+    const completedEvents = await eventStore.listByRun(firstResult.runId);
+    expect(completedEvents).toContainEqual(
+      expect.objectContaining({
+        type: 'approval.resolved',
+        payload: expect.objectContaining({
+          toolName: 'secure.write',
+          assistantContent,
+          approved: true,
+        }),
+      }),
+    );
+    expect(completedEvents).toContainEqual(
+      expect.objectContaining({
+        type: 'tool.started',
+        payload: expect.objectContaining({
+          toolName: 'secure.write',
+          assistantContent,
+        }),
+      }),
+    );
+    expect(completedEvents).toContainEqual(
+      expect.objectContaining({
+        type: 'tool.completed',
+        payload: expect.objectContaining({
+          toolName: 'secure.write',
+          assistantContent,
+          output: { ok: true },
+        }),
+      }),
+    );
   });
 
   it('continues a clarification-requested run after resolveClarification()', async () => {

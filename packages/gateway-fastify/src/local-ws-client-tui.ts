@@ -41,7 +41,7 @@ import {
   recordInteractiveSession,
   selectInteractiveSession,
 } from './local-ws-client/interactive.js';
-import { formatCompactAgentEventFrame } from './local-event-format.js';
+import { extractAssistantContentForEvent, formatCompactAgentEventFrame } from './local-event-format.js';
 import { isClarificationRequestOutput, shortRunId } from './local-ws-client/render.js';
 
 import {
@@ -551,6 +551,20 @@ async function runTuiMode(
           tui.requestRender();
           break;
         }
+        if (state.eventMode === 'compact') {
+          const assistantContent = extractAssistantContentForEvent(frame);
+          if (assistantContent && frame.runId) {
+            const lastShown = state.lastAssistantContentByRun.get(frame.runId);
+            if (lastShown !== assistantContent) {
+              state.lastAssistantContentByRun.set(frame.runId, assistantContent);
+              messageLog.addMessage({
+                type: 'assistant',
+                content: assistantContent,
+                timestamp: new Date(),
+              });
+            }
+          }
+        }
         messageLog.addMessage({
           type: 'event',
           content: formatCompactAgentEventFrame(frame, { prefixStyle: 'seq' }),
@@ -875,9 +889,19 @@ async function runTuiMode(
   };
 
   tui.start();
+  // Periodically re-render so the input panel's elapsed-time indicator stays
+  // current even when no events are arriving (e.g., during a long-running
+  // model call). 1s cadence is precise enough for "thinking 47s" style output
+  // and cheap because the TUI only repaints invalidated regions.
+  const elapsedTickHandle = setInterval(() => {
+    if (state.latestAgentEvent) {
+      tui.requestRender();
+    }
+  }, 1000);
   try {
     await closed.promise;
   } finally {
+    clearInterval(elapsedTickHandle);
     tui.stop();
   }
 }
@@ -923,6 +947,7 @@ async function main(): Promise<void> {
     approvalSessionIds: new Map(),
     clarificationSessionIds: new Map(),
     failedRunSessionIds: new Map(),
+    lastAssistantContentByRun: new Map(),
     connected: false,
   };
   const token = options.token ?? (await mintLocalDevJwt({

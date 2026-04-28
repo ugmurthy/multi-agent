@@ -35,6 +35,7 @@ export class OpenRouterAdapter extends BaseOpenAIChatAdapter {
         jsonOutput: true,
         streaming: true,
         usage: true,
+        imageInput: true,
       },
     };
 

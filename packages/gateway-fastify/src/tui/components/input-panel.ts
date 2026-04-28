@@ -3,6 +3,9 @@ import type { Component, Editor } from '@mariozechner/pi-tui';
 import type { TuiClientState } from '../types.js';
 import { renderBottomBorder, renderFrameLine, renderTopBorder } from './box-frame.js';
 
+const STALE_EVENT_THRESHOLD_MS = 5000;
+const MODEL_THINKING_EVENT_TYPES = new Set(['model.started']);
+
 export class InputPanel implements Component {
   private state: TuiClientState;
   private editor: Editor;
@@ -85,6 +88,31 @@ export class InputPanel implements Component {
       return chalk.dim('live event none yet');
     }
 
-    return [chalk.dim('live'), event.compactText].join(chalk.dim(' | '));
+    const elapsedMs = Date.now() - event.timestamp.getTime();
+    const parts = [chalk.dim('live'), event.compactText];
+
+    if (MODEL_THINKING_EVENT_TYPES.has(event.eventType)) {
+      parts.push(chalk.yellow(`thinking ${formatElapsed(elapsedMs)}`));
+    } else if (elapsedMs >= STALE_EVENT_THRESHOLD_MS) {
+      parts.push(chalk.dim(`(idle ${formatElapsed(elapsedMs)})`));
+    }
+
+    return parts.join(chalk.dim(' | '));
   }
+}
+
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '0s';
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`;
+  }
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds === 0 ? `${minutes}m` : `${minutes}m${remainingSeconds}s`;
 }
