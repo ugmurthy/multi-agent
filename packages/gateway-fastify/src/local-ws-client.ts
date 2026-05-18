@@ -108,7 +108,8 @@ const HELP_TEXT = `Commands:
                              steer exactly the specified run via mode=exact
   /approve [runId] [yes|no]  resolve the pending approval for the session
   /clarify [runId] <text>    answer a pending clarification for a run
-  /event [on [verbose]|off]  stream one-line, detailed, or muted realtime agent.event frames
+  /event [progress|compact|on [verbose]|off]
+                             stream progress, one-line, detailed, or muted realtime agent.event frames
   /ping                      send a ping frame
   /session                   print the active session id
   /help                      show this help
@@ -153,7 +154,7 @@ async function main(): Promise<void> {
 
   const options = await parseArgs(args);
   const state: ClientState = {
-    eventMode: 'compact',
+    eventMode: 'progress',
     approvalSessionIds: new Map(),
     clarificationSessionIds: new Map(),
     failedRunSessionIds: new Map(),
@@ -298,18 +299,20 @@ async function main(): Promise<void> {
         }
 
         if (!options.verbose) {
-          if (state.eventMode === 'compact') {
+          if (state.eventMode === 'progress' || state.eventMode === 'compact') {
             const assistantContent = extractAssistantContentForEvent(frame);
             if (assistantContent && frame.runId) {
               const lastShown = state.lastAssistantContentByRun.get(frame.runId);
               if (lastShown !== assistantContent) {
                 state.lastAssistantContentByRun.set(frame.runId, assistantContent);
-                console.log('assistant>');
+                console.log('progress>');
                 console.log(assistantContent);
               }
             }
+          }
+          if (state.eventMode === 'compact') {
             console.log(formatCompactAgentEventFrame(frame));
-          } else {
+          } else if (state.eventMode === 'verbose') {
             console.log(formatVerboseAgentEventFrame(frame));
           }
         }

@@ -4,12 +4,15 @@ import { extname } from 'node:path';
 
 import type { ToolDefinition } from '../types.js';
 import { buildWorkspacePathRecovery, PathOutsideRootError, resolvePathWithinRoot } from './path-utils.js';
+import { extractPdfTextWithPdfJs } from './pdf-text.js';
 
 export interface ReadFileToolConfig {
   /** Restrict reads to paths under this root. Defaults to `process.cwd()`. */
   allowedRoot?: string;
   /** Maximum file size in bytes. Defaults to 1 MiB. */
   maxSizeBytes?: number;
+  /** Override PDF extraction for tests or custom runtimes. */
+  extractPdfText?: (rawBuffer: ArrayBuffer) => Promise<{ title: string; text: string }>;
   /** Override pandoc-based extraction for tests or custom runtimes. */
   extractWithPandoc?: (filePath: string, inputFormat: string, signal?: AbortSignal) => Promise<string>;
 }
@@ -74,7 +77,6 @@ const PANDOC_INPUT_FORMAT_BY_EXTENSION: Record<string, string> = {
   '.odt': 'odt',
   '.opml': 'opml',
   '.org': 'org',
-  '.pdf': 'pdf',
   '.pptx': 'pptx',
   '.rst': 'rst',
   '.rtf': 'rtf',
@@ -86,6 +88,7 @@ const PANDOC_INPUT_FORMAT_BY_EXTENSION: Record<string, string> = {
 export function createReadFileTool(config?: ReadFileToolConfig): ToolDefinition {
   const allowedRoot = config?.allowedRoot ?? process.cwd();
   const maxSizeBytes = config?.maxSizeBytes ?? DEFAULT_MAX_SIZE;
+  const extractPdfText = config?.extractPdfText ?? extractPdfTextWithPdfJs;
   const extractWithPandoc = config?.extractWithPandoc ?? defaultExtractWithPandoc;
 
   return {
@@ -130,7 +133,7 @@ export function createReadFileTool(config?: ReadFileToolConfig): ToolDefinition 
         throw new Error(`File ${resolved} exceeds maximum size of ${maxSizeBytes} bytes`);
       }
 
-      const content = await readContentAsText(resolved, contentBuffer, extractWithPandoc, context?.signal);
+      const content = await readContentAsText(resolved, contentBuffer, extractPdfText, extractWithPandoc, context?.signal);
 
       return {
         path: resolved,
@@ -144,11 +147,20 @@ export function createReadFileTool(config?: ReadFileToolConfig): ToolDefinition 
 async function readContentAsText(
   resolvedPath: string,
   contentBuffer: Buffer,
+  extractPdfText: (rawBuffer: ArrayBuffer) => Promise<{ title: string; text: string }>,
   extractWithPandoc: (filePath: string, inputFormat: string, signal?: AbortSignal) => Promise<string>,
   signal: AbortSignal | undefined,
 ): Promise<string> {
   const extension = extname(resolvedPath).toLowerCase();
   const pandocInputFormat = PANDOC_INPUT_FORMAT_BY_EXTENSION[extension];
+
+  if (extension === '.pdf') {
+    const extracted = await extractPdfText(contentBuffer.buffer.slice(
+      contentBuffer.byteOffset,
+      contentBuffer.byteOffset + contentBuffer.byteLength,
+    ));
+    return extracted.text;
+  }
 
   if (pandocInputFormat) {
     return extractWithPandoc(resolvedPath, pandocInputFormat, signal);

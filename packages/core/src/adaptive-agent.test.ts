@@ -90,6 +90,58 @@ function createBudgetedSearchTool(): ToolDefinition {
 }
 
 describe('AdaptiveAgent', () => {
+  it('rewrites file content parts to read_file instructions when native file input is unavailable', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'agent-file-policy-'));
+    try {
+      const filePath = join(tempDir, 'brief.docx');
+      await writeFile(filePath, 'placeholder');
+      const model = new SequenceModel([{ finishReason: 'stop', text: 'done' }], 'mesh');
+      const agent = new AdaptiveAgent({
+        model,
+        tools: [createReadFileTool({ allowedRoot: tempDir })],
+        runStore: new InMemoryRunStore(),
+        eventStore: new InMemoryEventStore(),
+        snapshotStore: new InMemorySnapshotStore(),
+      });
+
+      await agent.run({
+        goal: 'Summarize the attachment.',
+        contentParts: [{ type: 'file', file: { source: { kind: 'path', path: filePath }, name: 'brief.docx' } }],
+      });
+
+      const userMessage = model.receivedRequests[0]?.messages.find((message) => message.role === 'user');
+      expect(Array.isArray(userMessage?.content)).toBe(true);
+      const parts = userMessage?.content as Array<{ type: string; text?: string }>;
+      expect(parts.some((part) => part.type === 'file')).toBe(false);
+      expect(parts.at(-1)?.text).toContain('use the read_file tool');
+      expect(parts.at(-1)?.text).toContain('Read each listed file at most once unless you need to re-check it.');
+      expect(parts.at(-1)?.text).toContain(filePath);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves file content parts when provider_native policy is selected', async () => {
+    const model = new SequenceModel([{ finishReason: 'stop', text: 'done' }], 'mesh');
+    const agent = new AdaptiveAgent({
+      model,
+      tools: [createReadFileTool()],
+      runStore: new InMemoryRunStore(),
+      eventStore: new InMemoryEventStore(),
+      snapshotStore: new InMemorySnapshotStore(),
+      defaults: { fileInputPolicy: 'provider_native' },
+    });
+
+    await agent.run({
+      goal: 'Summarize the attachment.',
+      contentParts: [{ type: 'file', file: { source: { kind: 'path', path: '/tmp/brief.pdf' }, name: 'brief.pdf' } }],
+    });
+
+    const userMessage = model.receivedRequests[0]?.messages.find((message) => message.role === 'user');
+    expect(Array.isArray(userMessage?.content)).toBe(true);
+    expect((userMessage?.content as Array<{ type: string }>).some((part) => part.type === 'file')).toBe(true);
+  });
+
   it('uses transcript messages for chat-style runs', async () => {
     const runStore = new InMemoryRunStore();
     const eventStore = new InMemoryEventStore();

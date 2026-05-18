@@ -192,6 +192,7 @@ export interface AgentDefaults {
   toolTimeoutMs?: number;
   modelTimeoutMs?: number;
   maxRetriesPerStep?: number;
+  fileInputPolicy?: FileInputPolicy;
   requireApprovalForWriteTools?: boolean;
   /** When true, tools with `requiresApproval` are executed without pausing for approval. */
   autoApproveAll?: boolean;
@@ -201,6 +202,8 @@ export interface AgentDefaults {
   /** When false, skip the initial system manifest that describes callable tools and delegates. */
   injectToolManifest?: boolean;
 }
+
+export type FileInputPolicy = 'provider_native' | 'read_file' | 'auto';
 
 export interface ToolBudget {
   maxCalls?: number;
@@ -352,6 +355,8 @@ export interface AdaptiveAgentOptions {
   /** Optional structured runtime logger. Pino is the intended implementation. */
   logger?: Logger;
   defaults?: AgentDefaults;
+  /** Optional resolver for non-URL external file IDs before read_file normalization. */
+  materializeFileInput?: (file: FileInput, context: { workspaceRoot: string; signal?: AbortSignal }) => Promise<PathInputSource>;
   /** Optional system instructions injected into the system prompt. Used by delegate/skill child runs. */
   systemInstructions?: string;
 }

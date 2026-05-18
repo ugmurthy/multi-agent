@@ -142,6 +142,7 @@ export function createAdaptiveAgent<
     eventSink: options.eventSink,
     logger: options.logger,
     defaults: options.defaults,
+    ...(options.materializeFileInput ? { materializeFileInput: options.materializeFileInput } : {}),
     systemInstructions: options.systemInstructions,
   });
 

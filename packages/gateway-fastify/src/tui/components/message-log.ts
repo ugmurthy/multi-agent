@@ -63,6 +63,8 @@ export class MessageLog implements Component {
         return chalk.blue('you>');
       case 'assistant':
         return chalk.green('assistant>');
+      case 'progress':
+        return chalk.green('progress>');
       case 'run':
         return chalk.cyan('run>');
       case 'system':
@@ -77,7 +79,7 @@ export class MessageLog implements Component {
   private formatContent(entry: MessageEntry, maxWidth: number): string[] {
     const content = String(entry.content ?? '');
 
-    if (entry.type === 'assistant' || entry.type === 'run') {
+    if (entry.type === 'assistant' || entry.type === 'progress' || entry.type === 'run') {
       const markdown = new Markdown(content, 0, 0, defaultMarkdownTheme);
       const rendered = markdown.render(maxWidth);
       return rendered.length > 0 ? rendered : [''];

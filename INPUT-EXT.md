@@ -276,6 +276,30 @@ Rules:
 - Providers MAY reject smaller payloads.
 - The runtime MUST NOT fetch remote URLs during validation.
 
+### 8.6 File input policy
+
+Agent defaults MAY select how `file` content parts are handled before provider dispatch:
+
+```ts
+export type FileInputPolicy = 'provider_native' | 'read_file' | 'auto';
+
+export interface AgentDefaults {
+  fileInputPolicy?: FileInputPolicy;
+}
+```
+
+Rules:
+
+- The default is `auto`.
+- `provider_native` MUST preserve `file` content parts and rely on adapter/provider support.
+- `read_file` MUST remove `file` content parts before adapter dispatch, materialize non-path sources when possible, and inject a text instruction telling the model to use `read_file` for the resulting paths.
+- `auto` MUST use `provider_native` when the selected model adapter declares `input.file`; otherwise it MUST use `read_file` when the model supports tool calling and `read_file` is available.
+- `read_file` policy MUST fail before provider dispatch when `read_file` is unavailable or the model cannot call tools.
+- The injected instruction MUST include: `Read each listed file at most once unless you need to re-check it.`
+- URL-backed files MAY be materialized into `workspaceRoot/tmp/file-inputs` before instruction injection.
+- `file_id` sources require a runtime/client resolver that materializes the file into a workspace-local path before instruction injection.
+- Materialized filenames SHOULD preserve a useful extension so `read_file` can select the right extractor.
+
 ## 9. Provider Support Matrix
 
 This is the required support matrix for the first implementation.
@@ -349,7 +373,8 @@ SDK evidence:
 Adapter commitments:
 
 - `MeshAdapter` MUST support `audio` with sources `path` and `data`.
-- `MeshAdapter` MUST reject all `file` inputs before SDK dispatch.
+- `MeshAdapter` MUST reject all native `file` inputs before SDK dispatch.
+- With the default `fileInputPolicy: 'auto'`, Mesh `file` inputs MUST be normalized through the `read_file` policy before they reach the adapter.
 - `MeshAdapter` MUST reject `audio` `url` and `file_id` sources before SDK dispatch.
 - For `audio.path`, the adapter MUST read and base64-encode the file into `input_audio.data`.
 - For `audio.data`, the adapter MUST pass the raw base64 string unchanged.
@@ -480,12 +505,13 @@ The fallback path MUST reject unsupported modalities unless a specific adapter o
 The change is complete only if all of the following are true:
 
 - A `RunRequest` with `goal + contentParts[file]` validates and reaches a supporting adapter.
+- A `RunRequest` with `goal + contentParts[file]` and a provider without native `file` support is normalized into `read_file` instructions when `fileInputPolicy` is `auto`.
 - A `RunRequest` with `goal + contentParts[audio]` validates and reaches a supporting adapter.
 - Legacy `images` callers still behave exactly as before.
 - Unsupported modality/source combinations fail before provider dispatch with deterministic error messages.
 - OpenRouter adapter tests cover `file.path`, `file.url`, `file.file_id`, `audio.path`, and `audio.data`.
 - Mistral adapter tests cover `file.path`, `file.url`, `file.file_id`, `audio.path`, and `audio.data`.
-- Mesh adapter tests cover `audio.path`, `audio.data`, and `file` rejection.
+- Mesh/runtime tests cover `audio.path`, `audio.data`, native `file` rejection, and default `file` to `read_file` normalization.
 - Logging tests prove that inline base64 audio is never logged.
 - Existing image tests continue to pass.
 

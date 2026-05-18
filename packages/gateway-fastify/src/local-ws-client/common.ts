@@ -1,6 +1,6 @@
 import type { ApprovalRequestedFrame, ApprovalResolveFrame, OutboundFrame, SessionUpdatedFrame } from '../protocol.js';
 
-export type EventStreamMode = 'off' | 'compact' | 'verbose';
+export type EventStreamMode = 'off' | 'progress' | 'compact' | 'verbose';
 
 export interface ClientOptions {
   url?: string;

@@ -1,4 +1,9 @@
 import type { Logger } from 'pino';
+import { createWriteStream } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { basename, extname, join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 import { DelegationError, DelegationExecutor, type ExecuteChildRunRequest, type ParentResumeResult } from './delegation-executor.js';
 import {
@@ -25,6 +30,7 @@ import type {
   ExecutePlanRequest,
   EventSink,
   FailureKind,
+  FileInput,
   ImageInput,
   JsonObject,
   JsonSchema,
@@ -254,19 +260,20 @@ export class AdaptiveAgent {
   }
 
   async run(request: RunRequest): Promise<RunResult> {
+    const normalizedContentParts = await this.normalizeFileInputsForReadFile(request.contentParts);
     const { run: createdRun, state } = await this.createRunWithInitialSnapshot({
       goal: request.goal,
       input: request.input,
       context: request.context,
       metadata: request.metadata,
       status: 'queued',
-    }, (run) => this.createInitialExecutionState(run, request.outputSchema, request.images, request.contentParts));
+    }, (run) => this.createInitialExecutionState(run, request.outputSchema, request.images, normalizedContentParts));
 
     this.logLifecycle('info', 'run.created', {
       ...runLogBindings(createdRun),
       goal: summarizeValueForLog(request.goal),
       input: captureValueForLog(request.input, { mode: this.defaultCaptureMode }),
-      contentParts: summarizeContentPartsForLog(normalizeContentParts(request.images, request.contentParts)),
+      contentParts: summarizeContentPartsForLog(normalizeContentParts(request.images, normalizedContentParts)),
       context: captureValueForLog(request.context, { mode: this.defaultCaptureMode }),
       metadata: captureValueForLog(request.metadata, { mode: 'summary' }),
       outputSchema: request.outputSchema ? summarizeValueForLog(request.outputSchema) : undefined,
@@ -276,13 +283,14 @@ export class AdaptiveAgent {
   }
 
   async chat(request: ChatRequest): Promise<ChatResult> {
+    const normalizedMessages = await this.normalizeChatFileInputsForReadFile(request.messages);
     const initialMessages = buildInitialChatMessages(
-      request.messages,
+      normalizedMessages,
       request.context,
       this.options.systemInstructions,
       this.buildRuntimeToolManifestMessage(),
     );
-    const goal = summarizeChatGoal(request.messages);
+    const goal = summarizeChatGoal(normalizedMessages);
     const { run: createdRun, state } = await this.createRunWithInitialSnapshot({
       goal,
       context: request.context,
@@ -297,8 +305,8 @@ export class AdaptiveAgent {
       metadata: captureValueForLog(request.metadata, { mode: 'summary' }),
       outputSchema: request.outputSchema ? summarizeValueForLog(request.outputSchema) : undefined,
       chat: true,
-      messageCount: request.messages.length,
-      imageCount: countChatImages(request.messages),
+      messageCount: normalizedMessages.length,
+      imageCount: countChatImages(normalizedMessages),
     });
 
     return this.runWithExistingRun(createdRun.id, { outputSchema: request.outputSchema, initialState: state });
@@ -2135,6 +2143,7 @@ export class AdaptiveAgent {
       eventSink: this.options.eventSink,
       logger: this.options.logger,
       defaults,
+      ...(this.options.materializeFileInput ? { materializeFileInput: this.options.materializeFileInput } : {}),
       systemInstructions: delegate.instructions,
     });
   }
@@ -2452,6 +2461,92 @@ export class AdaptiveAgent {
       buildInitialMessages(run, outputSchema, this.options.systemInstructions, this.buildRuntimeToolManifestMessage(), images, contentParts),
       outputSchema,
     );
+  }
+
+  private async normalizeChatFileInputsForReadFile(messages: ChatMessage[]): Promise<ChatMessage[]> {
+    const normalized = await Promise.all(messages.map(async (message) => {
+      if (!Array.isArray(message.content)) {
+        return message;
+      }
+      const content = await this.normalizeFileInputsForReadFile(message.content);
+      return content === message.content ? message : { ...message, content };
+    }));
+    return normalized;
+  }
+
+  private async normalizeFileInputsForReadFile(contentParts?: ModelContentPart[]): Promise<ModelContentPart[] | undefined> {
+    if (!contentParts?.some((part) => part.type === 'file')) {
+      return contentParts;
+    }
+
+    const policy = this.resolveFileInputPolicy();
+    if (policy === 'provider_native') {
+      return contentParts;
+    }
+    this.assertReadFileToolAvailable();
+
+    const rewritten: ModelContentPart[] = [];
+    const readablePaths: string[] = [];
+    for (const part of contentParts) {
+      if (part.type !== 'file') {
+        rewritten.push(part);
+        continue;
+      }
+
+      const file = await this.materializeReadableFileInput(part.file);
+      readablePaths.push(file.source.path);
+    }
+
+    if (readablePaths.length === 0) {
+      return contentParts;
+    }
+
+    rewritten.push({
+      type: 'text',
+      text: [
+        'The user attached file inputs that are not included inline.',
+        'Before answering, use the read_file tool on each listed path when the file content is needed.',
+        'Read each listed file at most once unless you need to re-check it. Do not infer file contents from filenames.',
+        '',
+        ...readablePaths.map((path) => `- ${path}`),
+      ].join('\n'),
+    });
+
+    return rewritten;
+  }
+
+  private resolveFileInputPolicy(): 'provider_native' | 'read_file' {
+    const policy = this.options.defaults?.fileInputPolicy ?? 'auto';
+    if (policy === 'provider_native' || policy === 'read_file') {
+      return policy;
+    }
+    return this.options.model.capabilities.input?.file ? 'provider_native' : 'read_file';
+  }
+
+  private assertReadFileToolAvailable(): void {
+    if (!this.options.model.capabilities.toolCalling) {
+      throw new Error('fileInputPolicy=read_file requires a tool-calling model');
+    }
+    if (!this.toolRegistry.has('read_file')) {
+      throw new Error('fileInputPolicy=read_file requires the read_file tool');
+    }
+  }
+
+  private async materializeReadableFileInput(file: FileInput): Promise<FileInput & { source: { kind: 'path'; path: string } }> {
+    if (file.source.kind === 'path') {
+      return { ...file, source: file.source };
+    }
+
+    if (file.source.kind === 'url') {
+      return { ...file, source: { kind: 'path', path: await materializeUrlFileInput(file) } };
+    }
+
+    if (this.options.materializeFileInput) {
+      const source = await this.options.materializeFileInput(file, { workspaceRoot: process.cwd() });
+      return { ...file, source };
+    }
+
+    throw new Error('fileInputPolicy=read_file requires materializeFileInput for file_id sources');
   }
 
   private buildRuntimeToolManifestMessage(): ModelMessage | undefined {
@@ -3593,6 +3688,64 @@ function normalizeContentParts(images?: ImageInput[], contentParts?: ModelConten
     ...(contentParts ?? []),
     ...(images ?? []).map((image): ModelContentPart => ({ type: 'image', image })),
   ];
+}
+
+async function materializeUrlFileInput(file: FileInput): Promise<string> {
+  if (file.source.kind !== 'url') {
+    throw new Error('URL file materialization requires a url source');
+  }
+
+  const response = await fetch(file.source.url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch file input URL ${file.source.url}: HTTP ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error(`Failed to fetch file input URL ${file.source.url}: empty response body`);
+  }
+
+  const tempDir = join(process.cwd(), 'tmp', 'file-inputs');
+  await mkdir(tempDir, { recursive: true });
+  const extension = inferMaterializedFileExtension(file, response.headers.get('content-type'));
+  const path = join(tempDir, `${Date.now()}-${crypto.randomUUID()}${extension}`);
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(path));
+  return path;
+}
+
+function inferMaterializedFileExtension(file: FileInput, contentType: string | null): string {
+  const name = file.name ?? (file.source.kind === 'url' ? safeUrlBasename(file.source.url) : undefined);
+  const namedExtension = name ? extname(name) : '';
+  if (namedExtension) {
+    return namedExtension;
+  }
+
+  const mimeType = (file.mimeType ?? contentType ?? '').split(';', 1)[0]?.trim().toLowerCase();
+  switch (mimeType) {
+    case 'application/pdf':
+      return '.pdf';
+    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+      return '.docx';
+    case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+      return '.pptx';
+    case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+      return '.xlsx';
+    case 'text/csv':
+      return '.csv';
+    case 'text/markdown':
+      return '.md';
+    case 'text/plain':
+      return '.txt';
+    default:
+      return '.bin';
+  }
+}
+
+function safeUrlBasename(value: string): string | undefined {
+  try {
+    const name = basename(new URL(value).pathname);
+    return name || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function summarizeContentPartsForLog(contentParts: ModelContentPart[]): JsonValue | undefined {

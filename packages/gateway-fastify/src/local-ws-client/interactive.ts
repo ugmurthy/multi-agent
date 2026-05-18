@@ -143,7 +143,7 @@ export function parseEventsCommand(
       message:
         currentMode === 'off'
           ? 'Realtime events are off.'
-          : `Realtime events are on (${currentMode === 'compact' ? 'one-line' : 'verbose'}).`,
+          : `Realtime events are on (${formatEventStreamMode(currentMode)}).`,
     };
   }
 
@@ -155,6 +155,20 @@ export function parseEventsCommand(
   }
 
   if (args.length === 1 && args[0] === 'on') {
+    return {
+      eventMode: 'progress',
+      message: 'Realtime events enabled (progress).',
+    };
+  }
+
+  if (args.length === 1 && args[0] === 'progress') {
+    return {
+      eventMode: 'progress',
+      message: 'Realtime events enabled (progress).',
+    };
+  }
+
+  if (args.length === 1 && args[0] === 'compact') {
     return {
       eventMode: 'compact',
       message: 'Realtime events enabled (one-line).',
@@ -168,7 +182,18 @@ export function parseEventsCommand(
     };
   }
 
-  throw new Error('Usage: /event [on [verbose]|off]');
+  throw new Error('Usage: /event [progress|compact|on [verbose]|off]');
+}
+
+function formatEventStreamMode(mode: Exclude<EventStreamMode, 'off'>): string {
+  switch (mode) {
+    case 'progress':
+      return 'progress';
+    case 'compact':
+      return 'one-line';
+    case 'verbose':
+      return 'verbose';
+  }
 }
 
 export function isEventsCommand(command: string): boolean {

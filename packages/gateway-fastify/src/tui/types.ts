@@ -35,7 +35,7 @@ export interface TuiClientOptions {
 }
 
 export interface MessageEntry {
-  type: 'user' | 'assistant' | 'run' | 'system' | 'event';
+  type: 'user' | 'assistant' | 'progress' | 'run' | 'system' | 'event';
   content: string;
   timestamp: Date;
 }

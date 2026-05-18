@@ -45,6 +45,30 @@ describe('authenticateGatewayUpgrade', () => {
     });
   });
 
+  it('preserves authenticated identity when a public-channel upgrade includes a JWT', async () => {
+    const result = await authenticateGatewayUpgrade({
+      config: createPublicChannelConfig(),
+      auth: createResolvedJwtAuth(),
+      headers: {
+        authorization: `Bearer ${await signJwt({ sub: 'user-123', tenantId: 'acme', roles: ['operator'] })}`,
+      },
+      url: '/ws?channelId=public-feed',
+    });
+
+    expect(result.isPublicChannel).toBe(true);
+    expect(result.requestedChannelId).toBe('public-feed');
+    expect(result.authContext).toEqual({
+      subject: 'user-123',
+      tenantId: 'acme',
+      roles: ['operator'],
+      claims: expect.objectContaining({
+        sub: 'user-123',
+        tenantId: 'acme',
+        roles: ['operator'],
+      }),
+    });
+  });
+
   it('accepts a JWT from the websocket query string for browser clients', async () => {
     const token = await signJwt({ sub: 'user-123', tenantId: 'acme', roles: ['operator'] });
 

@@ -22,6 +22,20 @@ describe('MessageLog', () => {
     expect(rendered.some((line) => line.includes('assistant> # Summary'))).toBe(false);
   });
 
+  it('renders progress content with a progress prefix', () => {
+    const log = new MessageLog();
+
+    log.addMessage({
+      type: 'progress',
+      content: 'Checking available data',
+      timestamp: new Date(),
+    });
+
+    const rendered = log.render(80).map(stripAnsi);
+
+    expect(rendered.some((line) => line.includes('progress> Checking available data'))).toBe(true);
+  });
+
   it('truncates only the oversized message and still renders later messages', () => {
     const log = new MessageLog();
     const longMessage = Array.from({ length: 55 }, (_, index) => `line ${index + 1}`).join('\n');

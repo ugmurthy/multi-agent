@@ -72,23 +72,23 @@ export async function authenticateGatewayUpgrade(
 ): Promise<GatewayUpgradeAuthenticationResult> {
   const requestedChannelId = getRequestedChannelId(options.url);
   const isPublicChannel = requestedChannelId ? isPublicGatewayChannel(options.config, requestedChannelId) : false;
-
-  if (isPublicChannel) {
-    return {
-      requestedChannelId,
-      isPublicChannel: true,
-    };
-  }
+  const token = extractGatewayUpgradeToken(options.headers.authorization, options.url);
 
   if (!options.auth) {
     return {
       requestedChannelId,
-      isPublicChannel: false,
+      isPublicChannel,
     };
   }
 
-  const token = extractGatewayUpgradeToken(options.headers.authorization, options.url);
   if (!token) {
+    if (isPublicChannel) {
+      return {
+        requestedChannelId,
+        isPublicChannel: true,
+      };
+    }
+
     throw new GatewayAuthError('auth_required', 'A bearer JWT is required for this WebSocket upgrade.', {
       details: requestedChannelId ? { channelId: requestedChannelId } : undefined,
     });
@@ -107,7 +107,7 @@ export async function authenticateGatewayUpgrade(
   return {
     authContext,
     requestedChannelId,
-    isPublicChannel: false,
+    isPublicChannel,
   };
 }
 

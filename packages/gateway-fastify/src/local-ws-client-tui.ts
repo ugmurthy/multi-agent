@@ -73,7 +73,8 @@ const HELP_TEXT = `Commands:
                              steer exactly the specified run via mode=exact
   /approve [runId] [yes|no]  resolve the pending approval for the session
   /clarify [runId] <text>    answer a pending clarification for a run
-  /event [on [verbose]|off]  stream one-line, detailed, or muted realtime agent.event frames
+  /event [progress|compact|on [verbose]|off]
+                             stream progress, one-line, detailed, or muted realtime agent.event frames
   /ping                      send a ping frame
   /session                   print the active session id
   /clear                     clear the message log
@@ -567,19 +568,23 @@ async function runTuiMode(
           tui.requestRender();
           break;
         }
-        if (state.eventMode === 'compact') {
+        if (state.eventMode === 'progress' || state.eventMode === 'compact') {
           const assistantContent = extractAssistantContentForEvent(frame);
           if (assistantContent && frame.runId) {
             const lastShown = state.lastAssistantContentByRun.get(frame.runId);
             if (lastShown !== assistantContent) {
               state.lastAssistantContentByRun.set(frame.runId, assistantContent);
               messageLog.addMessage({
-                type: 'assistant',
+                type: 'progress',
                 content: assistantContent,
                 timestamp: new Date(),
               });
             }
           }
+        }
+        if (state.eventMode === 'progress') {
+          tui.requestRender();
+          break;
         }
         messageLog.addMessage({
           type: 'event',
@@ -1038,7 +1043,7 @@ async function main(): Promise<void> {
     channel: options.channel,
     tenantId: options.tenantId,
     roles: options.roles,
-    eventMode: 'compact',
+    eventMode: 'progress',
     approvalSessionIds: new Map(),
     clarificationSessionIds: new Map(),
     failedRunSessionIds: new Map(),

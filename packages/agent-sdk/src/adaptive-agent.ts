@@ -148,36 +148,29 @@ Usage:
   adaptive-agent run [options] <goal...>
   adaptive-agent chat [options] [message...]
   adaptive-agent spec <path> [options]
-  adaptive-agent eval cases --input <path> --out <path> [options]
-  adaptive-agent eval gaia --input <path> --out <path> [options]
   adaptive-agent config [options]
   adaptive-agent --spec <path> [options]
   bun run ./packages/agent-sdk/dist/adaptive-agent.js --spec <path> [options]
+
+Eval usage:
+  adaptive-agent eval cases --input <path> --out <path> [options]
+  adaptive-agent eval gaia --input <path> --out <path> [options]
 
 Commands:
   run                   Run a one-shot goal.
   chat                  Send one chat turn. Reads stdin when no message is given.
   spec                  Run the existing JSON spec format.
+  config                Print resolved SDK configuration.
+
+Eval commands:
   eval cases            Run generic benchmark cases from JSON/JSONL.
   eval gaia             Run GAIA benchmark rows from JSON/JSONL.
-  config                Print resolved SDK configuration.
 
 Options:
   --spec <path>           Path to the JSON spec file.
   --file <path>           Read run/chat prompt from a file.
   --input-json <json>     JSON input passed to run requests.
   --image <path>          Add an image attachment to a run request. Repeatable.
-  --input <path>          Benchmark input JSONL for eval cases.
-  --files-dir <path>      Directory for benchmark attachments.
-  --out <path>            Benchmark result JSONL path.
-  --artifacts <dir>       Benchmark artifact directory.
-  --resume                Skip benchmark cases already present in --out.
-  --fail-fast             Stop eval after the first failed case.
-  --limit <n>             Limit benchmark cases after filtering.
-  --offset <n>            Skip benchmark cases before filtering.
-  --ids <id,id,...>       Run only the listed benchmark case ids.
-  --level <value>         Run only matching benchmark level.
-  --split <value>         Add/filter benchmark split metadata.
   --mode <chat|run>       Override the spec mode.
   --cwd <path>            Working directory used for SDK config lookup.
   --agent <path>          Explicit path to agent.json.
@@ -191,6 +184,19 @@ Options:
   --inspect               Print a compact inspection summary after completion.
   --output <format>       Output format: pretty, json, or jsonl. Default: pretty.
   --help                  Show this help text.
+
+Eval options:
+  --input <path>          Benchmark input JSONL for eval cases.
+  --files-dir <path>      Directory for benchmark attachments.
+  --out <path>            Benchmark result JSONL path.
+  --artifacts <dir>       Benchmark artifact directory.
+  --resume                Skip benchmark cases already present in --out.
+  --fail-fast             Stop eval after the first failed case.
+  --limit <n>             Limit benchmark cases after filtering.
+  --offset <n>            Skip benchmark cases before filtering.
+  --ids <id,id,...>       Run only the listed benchmark case ids.
+  --level <value>         Run only matching benchmark level.
+  --split <value>         Add/filter benchmark split metadata.
 `;
 
 const PROVIDER_INPUT_CAPABILITIES: Record<

@@ -298,14 +298,21 @@ describe('parseClarifyCommand', () => {
 
 describe('parseEventsCommand', () => {
   it('reports the current realtime event mode when no explicit mode is supplied', () => {
-    expect(parseEventsCommand('/event', 'compact')).toEqual({
-      eventMode: 'compact',
-      message: 'Realtime events are on (one-line).',
+    expect(parseEventsCommand('/event', 'progress')).toEqual({
+      eventMode: 'progress',
+      message: 'Realtime events are on (progress).',
+    });
+  });
+
+  it('turns realtime events on in progress mode explicitly', () => {
+    expect(parseEventsCommand('/events on', 'verbose')).toEqual({
+      eventMode: 'progress',
+      message: 'Realtime events enabled (progress).',
     });
   });
 
   it('turns realtime events on in one-line mode explicitly', () => {
-    expect(parseEventsCommand('/events on', 'verbose')).toEqual({
+    expect(parseEventsCommand('/events compact', 'verbose')).toEqual({
       eventMode: 'compact',
       message: 'Realtime events enabled (one-line).',
     });
@@ -326,7 +333,7 @@ describe('parseEventsCommand', () => {
   });
 
   it('rejects invalid realtime event arguments', () => {
-    expect(() => parseEventsCommand('/events maybe', 'compact')).toThrow('Usage: /event [on [verbose]|off]');
+    expect(() => parseEventsCommand('/events maybe', 'compact')).toThrow('Usage: /event [progress|compact|on [verbose]|off]');
   });
 });
 

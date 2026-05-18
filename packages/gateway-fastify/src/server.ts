@@ -1512,116 +1512,13 @@ export async function handleGatewaySocketMessage(
       return openedSession;
     }
 
-    if (frame.type === 'message.send' && context.stores && context.gatewayConfig && context.agentRegistry) {
-      return await executeGatewayChatTurn(frame, {
-        gatewayConfig: context.gatewayConfig,
-        agentRegistry: context.agentRegistry,
-        stores: context.stores,
-        authContext: context.authContext,
-        hooks: context.hooks,
-        imageUploadDir: context.imageUploadDir,
-        now: context.now,
-        transcriptMessageIdFactory: context.transcriptMessageIdFactory,
-        realtimeEvents:
-          realtimeRequestId && emitRealtimeFrame
-            ? {
-                requestId: realtimeRequestId,
-                emitFrame: emitRealtimeFrame,
-              }
-            : undefined,
-      });
-    }
-
-    if (frame.type === 'run.start' && context.stores && context.gatewayConfig && context.agentRegistry) {
-      return await executeGatewayRunStart(frame, {
-        gatewayConfig: context.gatewayConfig,
-        agentRegistry: context.agentRegistry,
-        stores: context.stores,
-        authContext: context.authContext,
-        hooks: context.hooks,
-        imageUploadDir: context.imageUploadDir,
-        requestedChannelId: context.requestedChannelId,
-        now: context.now,
-        realtimeEvents:
-          realtimeRequestId && emitRealtimeFrame
-            ? {
-                requestId: realtimeRequestId,
-                emitFrame: emitRealtimeFrame,
-              }
-            : undefined,
-      });
-    }
-
-    if (frame.type === 'run.retry' && context.stores && context.agentRegistry) {
-      return await executeGatewayRunRetry(frame, {
-        gatewayConfig: context.gatewayConfig,
-        agentRegistry: context.agentRegistry,
-        stores: context.stores,
-        authContext: context.authContext,
-        hooks: context.hooks,
-        now: context.now,
-        realtimeEvents: emitRealtimeFrame
-          ? {
-              rootRunId: frame.runId,
-              emitFrame: emitRealtimeFrame,
-            }
-          : undefined,
-        hasRuntimeObserver: context.hasRuntimeObserver,
-      });
-    }
-
-    if (frame.type === 'run.continue' && context.stores && context.agentRegistry) {
-      return await executeGatewayRunContinue(frame, {
-        gatewayConfig: context.gatewayConfig,
-        agentRegistry: context.agentRegistry,
-        stores: context.stores,
-        authContext: context.authContext,
-        hooks: context.hooks,
-        now: context.now,
-        realtimeEvents: emitRealtimeFrame
-          ? {
-              rootRunId: frame.runId,
-              emitFrame: emitRealtimeFrame,
-            }
-          : undefined,
-        hasRuntimeObserver: context.hasRuntimeObserver,
-      });
-    }
-
-    if (frame.type === 'approval.resolve' && context.stores && context.agentRegistry) {
-      return await executeGatewayApprovalResolution(frame, {
-        gatewayConfig: context.gatewayConfig,
-        agentRegistry: context.agentRegistry,
-        stores: context.stores,
-        authContext: context.authContext,
-        hooks: context.hooks,
-        now: context.now,
-        realtimeEvents: emitRealtimeFrame
-          ? {
-              rootRunId: frame.runId,
-              emitFrame: emitRealtimeFrame,
-            }
-          : undefined,
-        hasRuntimeObserver: context.hasRuntimeObserver,
-      });
-    }
-
-    if (frame.type === 'clarification.resolve' && context.stores && context.agentRegistry) {
-      return await executeGatewayClarificationResolution(frame, {
-        gatewayConfig: context.gatewayConfig,
-        agentRegistry: context.agentRegistry,
-        stores: context.stores,
-        authContext: context.authContext,
-        hooks: context.hooks,
-        now: context.now,
-        realtimeEvents: emitRealtimeFrame
-          ? {
-              rootRunId: frame.runId,
-              emitFrame: emitRealtimeFrame,
-            }
-          : undefined,
-        hasRuntimeObserver: context.hasRuntimeObserver,
-      });
+    const executionFrame = await handleGatewayExecutionFrame(frame, {
+      context,
+      emitRealtimeFrame,
+      realtimeRequestId,
+    });
+    if (executionFrame) {
+      return executionFrame;
     }
 
     if (frame.type === 'channel.subscribe') {
@@ -1661,6 +1558,149 @@ export async function handleGatewaySocketMessage(
 
     return createProtocolErrorFrame(protocolError);
   }
+}
+
+type GatewayExecutionFrame = Extract<
+  InboundFrame,
+  { type: 'message.send' | 'run.start' | 'run.retry' | 'run.continue' | 'approval.resolve' | 'clarification.resolve' }
+>;
+
+async function handleGatewayExecutionFrame(
+  frame: InboundFrame,
+  options: {
+    context: GatewaySocketMessageContext;
+    emitRealtimeFrame?: (frame: OutboundFrame) => Promise<void>;
+    realtimeRequestId?: string;
+  },
+): Promise<OutboundFrame | undefined> {
+  if (!isGatewayExecutionFrame(frame)) {
+    return undefined;
+  }
+
+  const { context, emitRealtimeFrame, realtimeRequestId } = options;
+  if (!context.stores || !context.agentRegistry) {
+    return undefined;
+  }
+
+  switch (frame.type) {
+    case 'message.send':
+      if (!context.gatewayConfig) {
+        return undefined;
+      }
+      return await executeGatewayChatTurn(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        hooks: context.hooks,
+        imageUploadDir: context.imageUploadDir,
+        now: context.now,
+        transcriptMessageIdFactory: context.transcriptMessageIdFactory,
+        realtimeEvents:
+          realtimeRequestId && emitRealtimeFrame
+            ? {
+                requestId: realtimeRequestId,
+                emitFrame: emitRealtimeFrame,
+              }
+            : undefined,
+      });
+    case 'run.start':
+      if (!context.gatewayConfig) {
+        return undefined;
+      }
+      return await executeGatewayRunStart(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        hooks: context.hooks,
+        imageUploadDir: context.imageUploadDir,
+        requestedChannelId: context.requestedChannelId,
+        now: context.now,
+        realtimeEvents:
+          realtimeRequestId && emitRealtimeFrame
+            ? {
+                requestId: realtimeRequestId,
+                emitFrame: emitRealtimeFrame,
+              }
+            : undefined,
+      });
+    case 'run.retry':
+      return await executeGatewayRunRetry(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        hooks: context.hooks,
+        now: context.now,
+        realtimeEvents: emitRealtimeFrame
+          ? {
+              rootRunId: frame.runId,
+              emitFrame: emitRealtimeFrame,
+            }
+          : undefined,
+        hasRuntimeObserver: context.hasRuntimeObserver,
+      });
+    case 'run.continue':
+      return await executeGatewayRunContinue(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        hooks: context.hooks,
+        now: context.now,
+        realtimeEvents: emitRealtimeFrame
+          ? {
+              rootRunId: frame.runId,
+              emitFrame: emitRealtimeFrame,
+            }
+          : undefined,
+        hasRuntimeObserver: context.hasRuntimeObserver,
+      });
+    case 'approval.resolve':
+      return await executeGatewayApprovalResolution(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        hooks: context.hooks,
+        now: context.now,
+        realtimeEvents: emitRealtimeFrame
+          ? {
+              rootRunId: frame.runId,
+              emitFrame: emitRealtimeFrame,
+            }
+          : undefined,
+        hasRuntimeObserver: context.hasRuntimeObserver,
+      });
+    case 'clarification.resolve':
+      return await executeGatewayClarificationResolution(frame, {
+        gatewayConfig: context.gatewayConfig,
+        agentRegistry: context.agentRegistry,
+        stores: context.stores,
+        authContext: context.authContext,
+        hooks: context.hooks,
+        now: context.now,
+        realtimeEvents: emitRealtimeFrame
+          ? {
+              rootRunId: frame.runId,
+              emitFrame: emitRealtimeFrame,
+            }
+          : undefined,
+        hasRuntimeObserver: context.hasRuntimeObserver,
+      });
+  }
+}
+
+function isGatewayExecutionFrame(frame: InboundFrame): frame is GatewayExecutionFrame {
+  return (
+    frame.type === 'message.send' ||
+    frame.type === 'run.start' ||
+    frame.type === 'run.retry' ||
+    frame.type === 'run.continue' ||
+    frame.type === 'approval.resolve' ||
+    frame.type === 'clarification.resolve'
+  );
 }
 
 function createRealtimeFrameEmitter(

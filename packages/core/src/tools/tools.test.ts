@@ -122,10 +122,10 @@ describe('createReadFileTool', () => {
     ).rejects.toThrow();
   });
 
-  it('extracts text from PDFs with pandoc', async () => {
+  it('extracts text from PDFs with pdfjs', async () => {
     const tool = createReadFileTool({
       allowedRoot: tempDir,
-      extractWithPandoc: vi.fn().mockResolvedValue('First page\n\nSecond page'),
+      extractPdfText: vi.fn().mockResolvedValue({ title: '', text: 'First page\n\nSecond page' }),
     });
     await writeFile(join(tempDir, 'sample.pdf'), new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]));
 
